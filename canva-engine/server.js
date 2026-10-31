@@ -7,8 +7,9 @@
 //   POST /login/start {email}                   -> {state:'awaiting_code'|'error'}
 //   POST /login/code  {code}                    -> {state:'active'|'error'}
 //   POST /invite      {customerEmail}           -> {ok, result:'sent'|'already_invited'|'needs_relogin'|'blocked'|'error', message}
-//   POST /config      {brand}                   -> {ok, brand}   (brand id is changeable)
-//   GET  /status                                -> {email, state, brand, lastHeartbeat}
+//   POST /config      {brand?,proxy?}           -> {ok, brand, proxy}   (both changeable; proxy="" clears)
+//   POST /proxytest                             -> {ok, egressIp, proxy}  (confirm residential exit IP)
+//   GET  /status                                -> {email, state, brand, proxy, lastHeartbeat}
 //   GET  /health                                -> {ok:true}
 'use strict';
 if (!process.env.DISPLAY) process.env.DISPLAY = ':99';   // headful needs an X display (Xvfb)
@@ -41,21 +42,29 @@ async function initDb() {
     state text NOT NULL DEFAULT 'none',           -- none|awaiting_code|active|needs_relogin
     storage_state jsonb,
     brand text,
+    proxy text,
     last_heartbeat timestamptz,
     updated_at timestamptz NOT NULL DEFAULT NOW(),
     CONSTRAINT canva_account_singleton CHECK (id = 1)
   )`);
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS brand text`);
+  await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS proxy text`);
   await db.query(`INSERT INTO canva_account (id, state) VALUES (1, 'none') ON CONFLICT (id) DO NOTHING`);
 }
 async function getAccount() { const r = await db.query('SELECT * FROM canva_account WHERE id=1'); return r.rows[0] || { state: 'none' }; }
 async function getBrand() { if (process.env.CANVA_BRAND) return process.env.CANVA_BRAND; const a = await getAccount(); return (a && a.brand) || DEFAULT_BRAND; }
+async function getProxyRaw() { if (process.env.CANVA_PROXY) return process.env.CANVA_PROXY; const a = await getAccount(); return (a && a.proxy) || ''; }
+// parse "http://user:pass@host:port" | "host:port" | "user:pass@host:port" -> {server,username,password} or null
+function parseProxy(s) { s = String(s || '').trim(); if (!s) return null; try { const u = new URL(s.includes('://') ? s : 'http://' + s); return { server: u.protocol + '//' + u.host, username: decodeURIComponent(u.username || ''), password: decodeURIComponent(u.password || '') }; } catch (e) { return null; } }
+let PROXY_CFG = null;
+async function loadProxy() { PROXY_CFG = parseProxy(await getProxyRaw()); return PROXY_CFG; }
 async function setState(state, extra) {
   extra = extra || {};
   const sets = ['state=$1', 'updated_at=NOW()']; const vals = [state]; let i = 2;
   if ('email' in extra) { sets.push('email=$' + i); vals.push(extra.email); i++; }
   if ('storage' in extra) { sets.push('storage_state=$' + i); vals.push(extra.storage ? JSON.stringify(extra.storage) : null); i++; }
   if ('brand' in extra) { sets.push('brand=$' + i); vals.push(extra.brand); i++; }
+  if ('proxy' in extra) { sets.push('proxy=$' + i); vals.push(extra.proxy); i++; }
   if ('heartbeat' in extra) { sets.push('last_heartbeat=NOW()'); }
   await db.query('UPDATE canva_account SET ' + sets.join(', ') + ' WHERE id=1', vals);
 }
@@ -66,13 +75,26 @@ async function lock(timeoutMs) { const d = Date.now() + (timeoutMs || 120000); w
 function unlock() { LOCK = false; }
 
 // ─── puppeteer helpers ───
-async function launch() { return puppeteer.launch({ headless: false, userDataDir: PROFILE, args: ARGS, defaultViewport: null, ignoreDefaultArgs: ['--enable-automation'] }); }
+async function launch() { await loadProxy(); const args = PROXY_CFG ? ARGS.concat('--proxy-server=' + PROXY_CFG.server) : ARGS; return puppeteer.launch({ headless: false, userDataDir: PROFILE, args, defaultViewport: null, ignoreDefaultArgs: ['--enable-automation'] }); }
 async function newPage(browser) {
   const pages = await browser.pages();
   const page = pages.length ? pages[0] : await browser.newPage();
+  if (PROXY_CFG && (PROXY_CFG.username || PROXY_CFG.password)) { try { await page.authenticate({ username: PROXY_CFG.username, password: PROXY_CFG.password }); } catch (e) { log('proxy auth warn', e.message); } }
   await page.setUserAgent(UA);
   await page.setViewport({ width: 1366, height: 900 });
   return page;
+}
+async function proxyTest() {
+  await lock();
+  const browser = await launch();
+  try {
+    const page = await newPage(browser);
+    await page.goto('https://api.ipify.org?format=json', { waitUntil: 'domcontentloaded', timeout: 30000 });
+    const body = await page.evaluate(() => document.body ? document.body.innerText : '');
+    let ip = body; try { ip = (JSON.parse(body).ip) || body; } catch (e) {}
+    return { ok: true, egressIp: String(ip).trim(), proxy: PROXY_CFG ? PROXY_CFG.server : null };
+  } catch (e) { return { ok: false, message: e.message, proxy: PROXY_CFG ? PROXY_CFG.server : null }; }
+  finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
 async function shot(page, name) { try { const f = path.join(SHOTS, name + '-' + Date.now() + '.png'); await page.screenshot({ path: f }); log('screenshot', f); return f; } catch (e) { return null; } }
 
@@ -342,8 +364,9 @@ function send(res, code, obj) { res.writeHead(code, { 'Content-Type': 'applicati
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true });
-    if (req.method === 'GET' && req.url === '/status') { const a = await getAccount(); return send(res, 200, { email: a.email || null, state: a.state, brand: (a && a.brand) || DEFAULT_BRAND, lastHeartbeat: a.last_heartbeat || null }); }
-    if (req.method === 'POST' && req.url === '/config') { const b = await readBody(req); if (!b.brand) return send(res, 400, { ok: false, message: 'brand required' }); await setState((await getAccount()).state || 'none', { brand: String(b.brand).trim() }); return send(res, 200, { ok: true, brand: String(b.brand).trim() }); }
+    if (req.method === 'GET' && req.url === '/status') { const a = await getAccount(); return send(res, 200, { email: a.email || null, state: a.state, brand: (a && a.brand) || DEFAULT_BRAND, proxy: (a && a.proxy) ? 'set' : (process.env.CANVA_PROXY ? 'env' : null), lastHeartbeat: a.last_heartbeat || null }); }
+    if (req.method === 'POST' && req.url === '/config') { const b = await readBody(req); if (!('brand' in b) && !('proxy' in b)) return send(res, 400, { ok: false, message: 'brand and/or proxy required' }); const extra = {}; if ('brand' in b) extra.brand = String(b.brand).trim(); if ('proxy' in b) extra.proxy = String(b.proxy).trim(); await setState((await getAccount()).state || 'none', extra); const a = await getAccount(); return send(res, 200, { ok: true, brand: a.brand || DEFAULT_BRAND, proxy: a.proxy ? 'set' : null }); }
+    if (req.method === 'POST' && req.url === '/proxytest') { try { return send(res, 200, await proxyTest()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && req.url === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
     if (req.method === 'POST' && req.url === '/session/clear') { try { return send(res, 200, await sessionClear()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && req.url === '/login/start') { const b = await readBody(req); if (!b.email) return send(res, 400, { state: 'error', message: 'email required' }); try { return send(res, 200, await loginStart(String(b.email).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }
