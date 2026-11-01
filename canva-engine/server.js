@@ -557,20 +557,25 @@ async function fetchCode(regen) {
     if (!toCode) toCode = await clickByText(page, ['via code']);
     log('code: clicked via-code=' + toCode);
     // on an explicit refresh, try Canva's "reset/generate new code" control so the code actually changes
+    let code = null;
     if (regen) {
       try {
-        const before = (await getAccount()).code || '';
-        // use Puppeteer's native click on the Refresh control (scrolls into view + real trusted click)
+        const before = (await readCode(page, 8000).catch(() => null)) || ((await getAccount()).code || null);
+        // 1) native click on the Refresh control (scrolls into view + real trusted click)
         const handles = await page.$$('[role=dialog] button, [aria-modal=true] button, [role=dialog] [role=button]');
-        let clicked = false;
-        for (const h of handles) { const lbl = await page.evaluate(el => (((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.innerText || '')).toLowerCase()), h).catch(() => ''); if (/refresh|reset|regenerat|new code/.test(lbl)) { try { await h.click(); clicked = true; log('code: Refresh clicked (handle) "' + lbl.trim().slice(0, 20) + '"'); } catch (e) { log('code: Refresh click err ' + e.message); } break; } }
-        if (!clicked) log('code: no refresh control found');
-        else { await sleep(2500); try { await clickByText(page, ['generate new code', 'generate code', 'reset code', 'new code', 'regenerate', 'confirm']); } catch (e) {} await sleep(2500); }
-        log('code: before=' + before);
-      } catch (e) { log('code: regen err ' + e.message); }
+        let clicked = false, clickedLbl = '';
+        for (const h of handles) { const lbl = await page.evaluate(el => (((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.innerText || '')).toLowerCase()), h).catch(() => ''); if (/refresh|reset|regenerat|new code/.test(lbl)) { try { await h.click(); clicked = true; clickedLbl = lbl.trim().slice(0, 24); } catch (e) { log('regen click err ' + e.message); } break; } }
+        log('regen: refresh-clicked=' + clicked + ' "' + clickedLbl + '"');
+        await sleep(1500);
+        // 2) if Canva pops a confirmation, click its confirm button (text button — not the icon)
+        try { const confirmed = await page.evaluate(() => { const btns = [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button]')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }); for (const b of btns) { const t = (b.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase(); if (/^(reset|generate|regenerate|new code|confirm|continue|got it|yes)\b/.test(t)) { (b.closest('button,[role=button]') || b).click(); return t.slice(0, 24); } } return ''; }); if (confirmed) log('regen: confirm "' + confirmed + '"'); } catch (e) {}
+        // 3) wait until the code actually CHANGES from `before` (so we never read the stale one)
+        for (let i = 0; i < 12 && !code; i++) { await sleep(1000); const cur = await readCode(page, 1500).catch(() => null); if (cur && cur !== before) code = cur; }
+        log('regen: before=' + before + ' after=' + (code || '(unchanged)'));
+      } catch (e) { log('regen err ' + e.message); }
     }
     try { LAST_CONTROLS = await page.evaluate(() => { const dlg = document.querySelector('[role=dialog],[aria-modal=true]'); const dialogText = dlg ? (dlg.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 240) : ''; const ctrls = [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button],[role=dialog] a')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).map(e => ({ t: (e.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 24), a: (e.getAttribute('aria-label') || e.getAttribute('title') || '').slice(0, 24) })).filter(x => x.t || x.a).slice(0, 20); return { dialogText, ctrls }; }); } catch (e) { LAST_CONTROLS = []; }
-    const code = await readCode(page, 15000);
+    if (!code) code = await readCode(page, 15000);
     if (!code) { await shot(page, 'code-notfound'); return { ok: false, message: 'Code not found in dialog' }; }
     await setCode(code);
     log('code fetched: ' + code);

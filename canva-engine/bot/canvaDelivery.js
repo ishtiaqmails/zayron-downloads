@@ -84,30 +84,36 @@ async function sendCodeTo(sock, jid, email, fresh) {
   return { ok: true };
 }
 function multiMsg(rows, c) {
-  let exp = 'rotates about every 4 hours';
-  if (c && c.expiresAt) { const d = new Date(c.expiresAt); exp = d.toLocaleString('en-US', { timeZone: 'Asia/Karachi', hour: 'numeric', minute: '2-digit', hour12: true }) + ' · ' + d.toLocaleString('en-GB', { timeZone: 'Asia/Karachi', day: '2-digit', month: '2-digit', year: 'numeric' }); }
   const total = rows.length, joined = rows.filter(r => r.joined_at).length;
   const waiting = rows.filter(r => !r.joined_at);
+  // security: once everyone has joined, do NOT show the code (prevents the code being passed around)
+  if (!waiting.length) {
+    return [
+      '🎨 *Canva Education*',
+      '',
+      '✅ All ' + total + ' of your customers have joined — you’re all set.',
+      '',
+      'Need to add another customer? Place a new order and the code is sent to them automatically.'
+    ].join('\n');
+  }
+  let exp = 'rotates about every 4 hours';
+  if (c && c.expiresAt) { const d = new Date(c.expiresAt); exp = d.toLocaleString('en-US', { timeZone: 'Asia/Karachi', hour: 'numeric', minute: '2-digit', hour12: true }) + ' · ' + d.toLocaleString('en-GB', { timeZone: 'Asia/Karachi', day: '2-digit', month: '2-digit', year: 'numeric' }); }
   const L = [
     '🎨 *Canva Education*',
     '───────────',
     '',
-    '🔑 *Join code* (same for everyone)',
+    '🔑 *Join code*',
     '*' + ((c && c.code) || '') + '*',
     '🔗 ' + ((c && c.joinLink) || 'https://www.canva.com/class/join'),
     '⏳ Valid till: ' + exp,
     '',
-    '👥 ' + total + ' customers · ✅ ' + joined + ' joined · ⏳ ' + waiting.length + ' waiting'
+    '👥 ' + total + ' customers · ✅ ' + joined + ' joined · ⏳ ' + waiting.length + ' waiting',
+    '',
+    '*Still to join:*',
+    waiting.slice(0, 15).map(r => '• ' + r.email).join('\n')
   ];
-  if (waiting.length) {
-    L.push('', '*Still to join:*');
-    L.push(waiting.slice(0, 15).map(r => '• ' + r.email).join('\n'));
-    if (waiting.length > 15) L.push('…and ' + (waiting.length - 15) + ' more');
-    L.push('', 'Each opens the link and joins with their own email — it must match.');
-  } else {
-    L.push('', '✅ All your customers have joined. Reply *canva* anytime for the code to add more.');
-  }
-  L.push('', '🔄 Reply *canva* for the latest code.');
+  if (waiting.length > 15) L.push('…and ' + (waiting.length - 15) + ' more');
+  L.push('', 'Each opens the link and joins with their own email — it must match.', '', '🔄 Reply *canva* for the latest code.');
   return L.join('\n');
 }
 
