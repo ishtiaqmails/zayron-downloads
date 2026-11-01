@@ -110,6 +110,7 @@ async function maybeResendForText(sock, jid, phone, textLower) {
   if (!(await isEnabled())) return false;
   if (!['canva', 'canva code', 'get code', 'resend code', 'canva join', 'join code'].includes(textLower)) return false;
   const ph = normPhone(phone), suf = ph.slice(-10);
+  logger.info('canva keyword', { phone: ph, suffix: suf });
   // tolerant match: exact phone OR last-10-digits (handles country-code / LID differences)
   const r = await db.query("SELECT email, joined_at, expires_at FROM canva_allowlist WHERE (customer_phone=$1 OR right(customer_phone,10)=$2) AND (expires_at IS NULL OR expires_at>NOW()) ORDER BY added_at DESC LIMIT 1", [ph, suf]);
   if (!r.rows.length) {

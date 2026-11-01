@@ -559,17 +559,17 @@ async function fetchCode(regen) {
     // on an explicit refresh, try Canva's "reset/generate new code" control so the code actually changes
     if (regen) {
       try {
-        // Canva's "Refresh" control is an icon button — needs a REAL mouse click (untrusted script clicks are ignored)
-        const box = await page.evaluate(() => {
-          const els = [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button]')];
-          for (const e of els) { const t = (((e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('title') || '') + ' ' + (e.innerText || '')).toLowerCase()); if (/refresh|reset|regenerat|new code/.test(t)) { const b = (e.closest('button,[role=button]') || e).getBoundingClientRect(); if (b.width > 0 && b.height > 0) return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; } }
-          return null;
-        });
-        if (box) { await page.mouse.click(box.x, box.y); log('code: clicked Refresh (trusted)'); await sleep(3000); }
-        else log('code: no refresh control found');
-      } catch (e) {}
+        const before = (await getAccount()).code || '';
+        // use Puppeteer's native click on the Refresh control (scrolls into view + real trusted click)
+        const handles = await page.$$('[role=dialog] button, [aria-modal=true] button, [role=dialog] [role=button]');
+        let clicked = false;
+        for (const h of handles) { const lbl = await page.evaluate(el => (((el.getAttribute('aria-label') || '') + ' ' + (el.getAttribute('title') || '') + ' ' + (el.innerText || '')).toLowerCase()), h).catch(() => ''); if (/refresh|reset|regenerat|new code/.test(lbl)) { try { await h.click(); clicked = true; log('code: Refresh clicked (handle) "' + lbl.trim().slice(0, 20) + '"'); } catch (e) { log('code: Refresh click err ' + e.message); } break; } }
+        if (!clicked) log('code: no refresh control found');
+        else { await sleep(2500); try { await clickByText(page, ['generate new code', 'generate code', 'reset code', 'new code', 'regenerate', 'confirm']); } catch (e) {} await sleep(2500); }
+        log('code: before=' + before);
+      } catch (e) { log('code: regen err ' + e.message); }
     }
-    try { LAST_CONTROLS = await page.evaluate(() => [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button],[role=dialog] a')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).map(e => ({ t: (e.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 28), a: (e.getAttribute('aria-label') || e.getAttribute('title') || '').slice(0, 28) })).filter(x => x.t || x.a).slice(0, 25)); } catch (e) { LAST_CONTROLS = []; }
+    try { LAST_CONTROLS = await page.evaluate(() => { const dlg = document.querySelector('[role=dialog],[aria-modal=true]'); const dialogText = dlg ? (dlg.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 240) : ''; const ctrls = [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button],[role=dialog] a')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).map(e => ({ t: (e.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 24), a: (e.getAttribute('aria-label') || e.getAttribute('title') || '').slice(0, 24) })).filter(x => x.t || x.a).slice(0, 20); return { dialogText, ctrls }; }); } catch (e) { LAST_CONTROLS = []; }
     const code = await readCode(page, 15000);
     if (!code) { await shot(page, 'code-notfound'); return { ok: false, message: 'Code not found in dialog' }; }
     await setCode(code);
