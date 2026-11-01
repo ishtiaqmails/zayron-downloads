@@ -308,24 +308,40 @@ async function clickExactTrusted(page, rxSource, maxLen) {
   }, rxSource, maxLen);
   const el = handle.asElement();
   if (!el) { await handle.dispose(); return false; }
-  try { await page.mouse.move(180 + Math.random() * 500, 160 + Math.random() * 360, { steps: 6 }); } catch (e) {}
+  try { await el.hover(); } catch (e) {}   // move mouse to the target element itself (not a random point)
   try { await el.click({ delay: 50 + Math.floor(Math.random() * 70) }); } catch (e) { await el.dispose(); return false; }
   await el.dispose();
   return true;
+}
+// Reliable direct click (opening a dialog is not reCAPTCHA-gated) on the smallest button matching rx.
+async function clickDirect(page, rxSource, maxLen) {
+  return await page.evaluate((rxSource, maxLen) => {
+    const rx = new RegExp(rxSource, 'i');
+    const els = [...document.querySelectorAll('button,[role=button]')];
+    let best = els.find(e => { const r = e.getBoundingClientRect(); const t = (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim(); return r.width > 0 && r.height > 0 && t.toLowerCase() === rxSource.toLowerCase(); });
+    if (!best) best = els.find(e => { const r = e.getBoundingClientRect(); const t = (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim(); return r.width > 0 && r.height > 0 && rx.test(t) && t.length <= maxLen; });
+    if (best) { (best.closest('button,[role=button]') || best).click(); return true; }
+    return false;
+  }, rxSource, maxLen).catch(() => false);
 }
 async function openInviteDialog(page) {
   const btn = await waitForButton(page, 'invite students', 40, 45000);
   log('inv: invite-students button present=' + btn);
   if (btn) {
-    await humanPause();
-    const c = await clickExactTrusted(page, 'invite students', 40);
-    log('inv: clicked invite-students=' + c);
-  } else { // fallback path: avatar -> Teams -> team -> Invite people
-    await clickByText(page, [''], { sel: '[aria-label*=Account i],[aria-label*=profile i],header img,nav img' }).catch(() => {});
-    await sleep(900);
-    await clickByText(page, ['teams', 'team']); await sleep(900);
-    await clickByText(page, ['invite people', 'invite members', 'invite students']); await sleep(1200);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await humanPause();
+      const c = await clickDirect(page, 'invite students', 40);   // opening is not reCAPTCHA-gated; direct click lands reliably
+      log('inv: clicked invite-students attempt ' + (attempt + 1) + ' = ' + c);
+      if (await waitInviteField(page, 15000)) { log('inv: email field present=true'); return true; }
+    }
+    log('inv: email field present=false (after retries)');
+    return false;
   }
+  // fallback path: avatar -> Teams -> team -> Invite people
+  await clickByText(page, [''], { sel: '[aria-label*=Account i],[aria-label*=profile i],header img,nav img' }).catch(() => {});
+  await sleep(900);
+  await clickByText(page, ['teams', 'team']); await sleep(900);
+  await clickByText(page, ['invite people', 'invite members', 'invite students']); await sleep(1200);
   const field = await waitInviteField(page, 20000);
   log('inv: email field present=' + field);
   return field;
