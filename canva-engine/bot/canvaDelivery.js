@@ -91,10 +91,12 @@ async function deliver(sock, order, product) {
   const u = (await db.query('SELECT phone, lid FROM users WHERE id=$1', [order.user_id])).rows[0] || {};
   const jid = customerJid({ phone: u.phone, lid: u.lid }) || (normPhone(u.phone) + '@s.whatsapp.net');
   const phone = normPhone(u.phone);
-  for (const e of emails) { await engine('POST', '/allow', { email: e, source: 'order', order_ref: order.order_no, customer_phone: phone, note: 'bot order ' + order.order_no }); }
+  const prejoined = {};
+  for (const e of emails) { const a = await engine('POST', '/allow', { email: e, source: 'order', order_ref: order.order_no, customer_phone: phone, note: 'bot order ' + order.order_no }); prejoined[String(e).trim().toLowerCase()] = !!(a && a.prejoined); }
   const c = await engine('GET', '/code');
   if (!c.ok) return { ok: false, reason: 'no_code', message: c.message };
-  for (const e of emails) { await sock.sendMessage(jid, { text: joinMsg(e, c) }); }
+  const yearLater = new Date(Date.now() + 365 * 86400000);
+  for (const e of emails) { if (prejoined[String(e).trim().toLowerCase()]) await sock.sendMessage(jid, { text: joinedMsg(e, yearLater) }); else await sock.sendMessage(jid, { text: joinMsg(e, c) }); }
   const newMeta = Object.assign({}, meta, { invite_status: 'engine_delivered', invite_code: c.code, invite_delivered_at: new Date().toISOString(), invite_via: 'canva_engine' });
   try { await db.query('UPDATE orders SET notes=$1 WHERE id=$2', [JSON.stringify(newMeta), order.id]); } catch (e) {}
   try { await db.query('UPDATE canva_allowlist SET last_sent_at=NOW() WHERE email = ANY($1::text[])', [emails.map(x => String(x).trim().toLowerCase())]); } catch (e) {}

@@ -14,7 +14,19 @@ function cvLoadStatus(){ cvGet('/status').then(function(s){
   document.getElementById('cv-s-state').textContent = s.state==='active'?'Active':(s.state||'—');
   document.getElementById('cv-s-state').style.color = s.state==='active'?'#059669':'#c2410c';
   document.getElementById('cv-acct-line').textContent = 'Brand '+(s.brand||'—')+' · proxy '+(s.proxy||'none')+' · checked '+cvWhen(s.lastHeartbeat);
+  var a=document.getElementById('cv-acct-state'); if(a) a.textContent=(s.state==='active'?'Connected':(s.state||'—'))+' · brand '+(s.brand||'—');
 }); }
+function cvSwitchAccount(btn){
+  var raw=(document.getElementById('cv-cookies').value||'').trim();
+  if(!raw){cvToast('Paste the cookies first');return;}
+  var cookies; try{ cookies=JSON.parse(raw); }catch(e){ cvToast('That is not valid JSON'); document.getElementById('cv-acct-msg').textContent='✗ Not valid JSON — use Cookie-Editor → Export → JSON.'; return; }
+  btn.disabled=true; btn.textContent='Switching…'; document.getElementById('cv-acct-msg').textContent='Verifying the new account…';
+  cvPost('/session/import',{cookies:cookies}).then(function(r){
+    btn.disabled=false; btn.textContent='Switch account';
+    if(r.ok){ cvToast('Account switched'); document.getElementById('cv-acct-msg').innerHTML='✅ '+cvEsc(r.message||'Switched')+(r.brand?(' · brand '+cvEsc(r.brand)):''); document.getElementById('cv-cookies').value=''; cvLoadStatus(); cvLoadCode(true); }
+    else { document.getElementById('cv-acct-msg').textContent='✗ '+(r.message||'Switch failed'); cvToast(r.message||'Switch failed'); }
+  });
+}
 
 function cvTickExp(){ var el=document.getElementById('cv-exp'); if(!CV.exp){el.textContent='';return;}
   var ms=new Date(CV.exp).getTime()-Date.now();

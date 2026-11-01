@@ -67,6 +67,15 @@ table.cv-tbl td{padding:10px 8px;border-bottom:1px solid #f4f5f9;vertical-align:
 </div>
 
 <div class="cv-card">
+  <div class="cv-card-head"><h3>👤 Canva account</h3><span class="hint" id="cv-acct-state"></span></div>
+  <div class="cv-card-body">
+    <div class="cv-note">Codes and invites come from this Canva account. To switch: log into the new account in your browser, export its <b>canva.com</b> cookies (Cookie-Editor → Export → JSON), paste below, then Switch — the brand is detected automatically and new codes come from it.</div>
+    <textarea class="cv-inp" id="cv-cookies" style="margin-top:10px;min-height:88px;" placeholder="Paste the exported canva.com cookies (JSON) here…"></textarea>
+    <div class="cv-row" style="margin-top:8px;"><button class="cv-btn" onclick="cvSwitchAccount(this)">Switch account</button><span class="cv-note" id="cv-acct-msg" style="margin:0;"></span></div>
+  </div>
+</div>
+
+<div class="cv-card">
   <div class="cv-card-head"><h3>⚙️ Automatic delivery</h3><span class="hint" id="cv-mode-hint"></span></div>
   <div class="cv-card-body">
     <label class="cv-toggle-wrap"><input type="checkbox" id="cv-enabled" onchange="cvToggleAuto(this)"><span class="cv-slider"></span><span class="cv-toggle-label" id="cv-toggle-label">Deliver Canva orders automatically</span></label>
@@ -161,4 +170,4 @@ table.cv-tbl td{padding:10px 8px;border-bottom:1px solid #f4f5f9;vertical-align:
 <div class="cv-toast" id="cv-toast"></div>
 
 <%- include('partials/footer') %>
-<script src="/js/canva.js?v=2"></script>
+<script src="/js/canva.js?v=3"></script>
