@@ -24,13 +24,19 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const puppeteerBase = require('/opt/galaxybot/node_modules/puppeteer');
-let puppeteer = puppeteerBase, STEALTH = false;
+let CHROME_PATH = null; try { CHROME_PATH = puppeteerBase.executablePath(); } catch (e) {}
+// Cloudflare's JS challenge detects automation via the CDP Runtime.enable leak, which
+// puppeteer-extra-stealth does NOT patch. rebrowser-puppeteer-core patches it. We drive the
+// SAME Chromium the bot already has (executablePath) so there is no extra download.
+let puppeteer = puppeteerBase, STEALTH = false, REBROWSER = false;
 try {
   const { addExtra } = require('/opt/lion-engine/node_modules/puppeteer-extra');
-  puppeteer = addExtra(puppeteerBase);
+  let base = puppeteerBase;
+  try { base = require('/opt/lion-engine/node_modules/rebrowser-puppeteer-core'); REBROWSER = true; } catch (e) {}
+  puppeteer = addExtra(base);
   puppeteer.use(require('/opt/lion-engine/node_modules/puppeteer-extra-plugin-stealth')());
   STEALTH = true;
-} catch (e) { /* stealth optional */ }
+} catch (e) { /* fall back to plain puppeteer */ }
 const db = require('/opt/galaxybot/src/db');
 let captcha = null;
 try { captcha = require('/opt/galaxybot/src/services/captchaService'); } catch (e) { /* set later */ }
@@ -138,7 +144,7 @@ async function lock(timeoutMs) { const d = Date.now() + (timeoutMs || 180000); w
 function unlock() { LOCK = false; }
 
 // ─── browser ───
-async function launch() { await loadProxy(); const args = PROXY_CFG ? ARGS.concat('--proxy-server=' + PROXY_CFG.server) : ARGS; return puppeteer.launch({ headless: false, userDataDir: PROFILE, args, defaultViewport: null, ignoreDefaultArgs: ['--enable-automation'] }); }
+async function launch() { await loadProxy(); const args = PROXY_CFG ? ARGS.concat('--proxy-server=' + PROXY_CFG.server) : ARGS; const opts = { headless: false, userDataDir: PROFILE, args, defaultViewport: null, ignoreDefaultArgs: ['--enable-automation'] }; if (CHROME_PATH) opts.executablePath = CHROME_PATH; return puppeteer.launch(opts); }
 async function newPage(browser) {
   const pages = await browser.pages();
   const page = pages.length ? pages[0] : await browser.newPage();
@@ -176,30 +182,28 @@ async function solveTurnstileParams(params, pageurl) {
   }
   throw new Error('2captcha timeout');
 }
-function isChallengePage(txt, title) { return /just a moment|performing security verification|checking your browser|verify you are human|attention required/i.test((txt || '') + ' ' + (title || '')); }
-// clear a Cloudflare interstitial if present; returns true when the page is through
+async function challengedNow(page) { return await page.evaluate(() => { const t = (document.body && document.body.innerText) || ''; return /just a moment|performing security verification|checking your browser|verify you are human|attention required/i.test(t + ' ' + (document.title || '')); }).catch(() => false); }
+// Clear a Cloudflare interstitial. bqpanel uses the JS fingerprint challenge (no captcha):
+// rebrowser + headful + residential IP should pass it on its own, so we wait for it to clear.
+// If a Turnstile widget ever appears, we solve it via 2captcha as a fallback.
 async function passCloudflare(page) {
-  const challenged = await page.evaluate(() => { const t = (document.body && document.body.innerText) || ''; return /just a moment|performing security verification|checking your browser|verify you are human|attention required/i.test(t + ' ' + (document.title || '')); }).catch(() => false);
-  if (!challenged) return true;
-  log('cloudflare challenge — capturing turnstile params');
-  let params = null;
-  for (let i = 0; i < 45; i++) { params = await page.evaluate(() => window.__cf).catch(() => null); if (params && params.sitekey) break; await sleep(1000); }
-  if (!params || !params.sitekey) {
-    const cfd = await page.evaluate(() => {
-      const frames = [...document.querySelectorAll('iframe')].map(f => f.src || '').slice(0, 6);
-      const cfDivs = [...document.querySelectorAll('.cf-turnstile, [data-sitekey]')].map(d => ({ sk: d.getAttribute('data-sitekey'), action: d.getAttribute('data-action'), cls: (d.className || '').slice(0, 30) }));
-      return { hasTurnstileGlobal: typeof window.turnstile !== 'undefined', cfChlOpt: window._cf_chl_opt ? Object.keys(window._cf_chl_opt) : null, cRay: (window._cf_chl_opt && window._cf_chl_opt.cRay) || null, frames, cfDivs, title: document.title, snippet: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 180) };
-    }).catch(e => ({ err: e.message }));
-    await shot(page, 'cf-noparams');
-    const err = new Error('cloudflare: could not capture turnstile params');
-    err.diag = cfd;
-    throw err;
+  if (!await challengedNow(page)) return true;
+  log('cloudflare challenge — waiting for the browser to clear it');
+  for (let i = 0; i < 40; i++) {
+    await sleep(1500);
+    if (!await challengedNow(page)) { log('cloudflare cleared (js challenge)'); return true; }
+    const p = await page.evaluate(() => window.__cf).catch(() => null);
+    if (p && p.sitekey) {
+      try { const token = await solveTurnstileParams(p, page.url()); await page.evaluate((tok) => { try { if (typeof window.__cfCb === 'function') window.__cfCb(tok); } catch (e) {} }, token); log('cloudflare turnstile solved'); }
+      catch (e) { log('cf turnstile solve', e.message); }
+    }
   }
-  log('solving cloudflare turnstile…', params.sitekey.slice(0, 10));
-  const token = await solveTurnstileParams(params, page.url());
-  await page.evaluate((tok) => { try { if (typeof window.__cfCb === 'function') window.__cfCb(tok); } catch (e) {} }, token);
-  for (let i = 0; i < 30; i++) { await sleep(1000); const still = await page.evaluate(() => { const t = (document.body && document.body.innerText) || ''; return /just a moment|performing security verification/i.test(t + ' ' + (document.title || '')); }).catch(() => false); if (!still) { log('cloudflare cleared'); return true; } }
-  await shot(page, 'cf-stuck'); throw new Error('cloudflare challenge did not clear after solve');
+  if (!await challengedNow(page)) return true;
+  const cfd = await page.evaluate(() => ({ hasTurnstileGlobal: typeof window.turnstile !== 'undefined', frames: [...document.querySelectorAll('iframe')].map(f => f.src || '').slice(0, 5), cfDivs: [...document.querySelectorAll('.cf-turnstile, [data-sitekey]')].length, title: document.title, snippet: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 160) })).catch(e => ({ err: e.message }));
+  await shot(page, 'cf-stuck');
+  const err = new Error('cloudflare JS challenge did not clear (browser still being flagged)');
+  err.diag = cfd;
+  throw err;
 }
 // navigate to a panel URL and clear any Cloudflare interstitial
 async function gotoPanel(page, url, waitMs) { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}); await sleep(waitMs || 2500); await passCloudflare(page); }
@@ -621,7 +625,7 @@ const server = http.createServer(async (req, res) => {
     const ADMIN = acct.admin_token || '';
     if (!(isLocal(req) || (ADMIN && token === ADMIN))) return send(res, 401, { error: 'unauthorized' });
 
-    if (req.method === 'GET' && p === '/status') { const a = await getAccount(); return send(res, 200, { state: a.state, credits: a.credits != null ? Number(a.credits) : null, proxy: a.proxy ? 'set' : (process.env.LION_PROXY ? 'env' : null), stealth: STEALTH, hasCreds: !!(a.panel_user && a.panel_pass), bouquet: a.bouquet, lastHeartbeat: a.last_heartbeat || null }); }
+    if (req.method === 'GET' && p === '/status') { const a = await getAccount(); return send(res, 200, { state: a.state, credits: a.credits != null ? Number(a.credits) : null, proxy: a.proxy ? 'set' : (process.env.LION_PROXY ? 'env' : null), stealth: STEALTH, rebrowser: REBROWSER, hasCreds: !!(a.panel_user && a.panel_pass), bouquet: a.bouquet, lastHeartbeat: a.last_heartbeat || null }); }
     if (req.method === 'POST' && p === '/config') { const b = await readBody(req); const f = {}; for (const k of ['panel_user', 'panel_pass', 'proxy', 'base_url', 'bouquet']) if (k in b) f[k] = String(b[k]).trim(); if (!Object.keys(f).length) return send(res, 400, { ok: false, message: 'nothing to set' }); await setAccount(f); const a = await getAccount(); return send(res, 200, { ok: true, hasCreds: !!(a.panel_user && a.panel_pass), proxy: a.proxy ? 'set' : null, bouquet: a.bouquet }); }
     if (req.method === 'POST' && p === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
     if (req.method === 'POST' && p === '/login') { try { await lock(); const browser = await launch(); try { const page = await newPage(browser); await doLogin(page); return send(res, 200, { ok: true, state: 'active' }); } finally { try { await browser.close(); } catch (e) {} unlock(); } } catch (e) { return send(res, 200, { ok: false, message: e.message, diag: e.diag || null }); } }
