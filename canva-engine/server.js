@@ -667,7 +667,7 @@ async function removeMember(email) {
   const netLog = []; let batchBody = null;
   try {
     const page = await newPage(browser);
-    page.on('request', req => { try { if (req.method() === 'POST' && /memberships\/batch/i.test(req.url())) { const b = req.postData(); if (b) batchBody = b.slice(0, 900); } } catch (e) {} });
+    page.on('request', req => { try { const m = req.method(); const u = req.url(); if (m !== 'GET' && /\/_ajax\//.test(u) && /member|brand|remove|delete|revoke|membership|group|batch/i.test(u)) { const b = req.postData() || ''; if (/memberships\/batch/i.test(u)) batchBody = b.slice(0, 900); log('REMOVE-REQ ' + m + ' ' + u.replace('https://www.canva.com', '').split('?')[0] + ' BODY=' + b.slice(0, 500)); } } catch (e) {} });
     page.on('response', async (res) => { try { const m = res.request().method(); const u = res.url(); if (m !== 'GET' && /\/_ajax\//.test(u) && /member|brand|remove|delete|revoke|membership|group/i.test(u)) netLog.push(m + ' ' + res.status() + ' ' + u.replace('https://www.canva.com', '').split('?')[0]); } catch (e) {} });
     await restoreStorage(page, acct.storage_state);
     if (!await isLoggedIn(page)) { await setState('needs_relogin'); return { ok: false, result: 'needs_relogin', message: 'Session expired' }; }
@@ -679,6 +679,7 @@ async function removeMember(email) {
     let rendered = false;
     for (let i = 0; i < 30 && !rendered; i++) { await sleep(1000); rendered = await page.evaluate(() => [...document.querySelectorAll('input')].some(x => /search/i.test((x.getAttribute('placeholder') || '') + (x.getAttribute('aria-label') || ''))) ).catch(() => false); }
     log('remove: people UI rendered=' + rendered);
+    if (!rendered) { const d = await page.evaluate(() => ({ url: location.href, title: document.title, inputs: document.querySelectorAll('input').length, btns: document.querySelectorAll('button').length, spinner: !!document.querySelector('[class*=loading i],[class*=spinner i],[aria-busy="true"]'), snippet: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 220) })).catch(e => ({ err: e.message })); log('remove: render-fail diag ' + JSON.stringify(d)); }
     // type email into the People search box to filter to just this member
     const typed = await page.evaluate(() => { const i = [...document.querySelectorAll('input')].find(x => { const ph = ((x.getAttribute('placeholder') || '') + ' ' + (x.getAttribute('aria-label') || '')).toLowerCase(); return /search/.test(ph) && /member|name|email/.test(ph); }); if (i) { i.focus(); return true; } return false; });
     if (typed) { await page.keyboard.type(email, { delay: 45 }); await sleep(4500); }
