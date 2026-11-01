@@ -559,10 +559,14 @@ async function fetchCode(regen) {
     // on an explicit refresh, try Canva's "reset/generate new code" control so the code actually changes
     if (regen) {
       try {
-        let did = await clickByText(page, ['reset code', 'refresh code', 'generate new code', 'regenerate code', 'new code', 'regenerate']);
-        if (!did) did = await page.evaluate(() => { const els = [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button],[role=dialog] svg,[role=dialog] [class*=icon]')]; for (const e of els) { const t = (((e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('title') || '') + ' ' + (e.innerText || '')).toLowerCase()); if (/reset|refresh|regenerat|new code/.test(t)) { (e.closest('button,[role=button]') || e).click(); return true; } } return false; }).catch(() => false);
-        log('code: regenerate attempt=' + did);
-        if (did) await sleep(2800);
+        // Canva's "Refresh" control is an icon button — needs a REAL mouse click (untrusted script clicks are ignored)
+        const box = await page.evaluate(() => {
+          const els = [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button]')];
+          for (const e of els) { const t = (((e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('title') || '') + ' ' + (e.innerText || '')).toLowerCase()); if (/refresh|reset|regenerat|new code/.test(t)) { const b = (e.closest('button,[role=button]') || e).getBoundingClientRect(); if (b.width > 0 && b.height > 0) return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; } }
+          return null;
+        });
+        if (box) { await page.mouse.click(box.x, box.y); log('code: clicked Refresh (trusted)'); await sleep(3200); try { await clickByText(page, ['refresh', 'reset', 'generate', 'confirm', 'yes']); } catch (e) {} await sleep(1500); }
+        else log('code: no refresh control found');
       } catch (e) {}
     }
     try { LAST_CONTROLS = await page.evaluate(() => [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button],[role=dialog] a')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).map(e => ({ t: (e.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 28), a: (e.getAttribute('aria-label') || e.getAttribute('title') || '').slice(0, 28) })).filter(x => x.t || x.a).slice(0, 25)); } catch (e) { LAST_CONTROLS = []; }
