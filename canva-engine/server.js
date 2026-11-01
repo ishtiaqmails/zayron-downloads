@@ -527,6 +527,7 @@ async function invite(customerEmail) {
 
 // ─── invite CODE (join-code delivery; NOT reCAPTCHA-gated — only opening the dialog + reading) ───
 const JOIN_LINK = 'https://www.canva.com/class/join';
+let LAST_CONTROLS = [];  // last invite-dialog buttons seen (diagnostics for the regenerate control)
 async function setCode(code) { await db.query('UPDATE canva_account SET code=$1, code_at=NOW(), updated_at=NOW() WHERE id=1', [code]); }
 async function readCode(page, ms) {
   const deadline = Date.now() + ms;
@@ -553,7 +554,15 @@ async function fetchCode(regen) {
     if (!toCode) toCode = await clickByText(page, ['via code']);
     log('code: clicked via-code=' + toCode);
     // on an explicit refresh, try Canva's "reset/generate new code" control so the code actually changes
-    if (regen) { try { const did = await clickByText(page, ['reset code', 'refresh code', 'generate new code', 'regenerate code', 'new code', 'regenerate']); if (did) { log('code: regenerate clicked'); await sleep(2500); } } catch (e) {} }
+    if (regen) {
+      try {
+        let did = await clickByText(page, ['reset code', 'refresh code', 'generate new code', 'regenerate code', 'new code', 'regenerate']);
+        if (!did) did = await page.evaluate(() => { const els = [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button],[role=dialog] svg,[role=dialog] [class*=icon]')]; for (const e of els) { const t = (((e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('title') || '') + ' ' + (e.innerText || '')).toLowerCase()); if (/reset|refresh|regenerat|new code/.test(t)) { (e.closest('button,[role=button]') || e).click(); return true; } } return false; }).catch(() => false);
+        log('code: regenerate attempt=' + did);
+        if (did) await sleep(2800);
+      } catch (e) {}
+    }
+    try { LAST_CONTROLS = await page.evaluate(() => [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button],[role=dialog] a')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).map(e => ({ t: (e.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 28), a: (e.getAttribute('aria-label') || e.getAttribute('title') || '').slice(0, 28) })).filter(x => x.t || x.a).slice(0, 25)); } catch (e) { LAST_CONTROLS = []; }
     const code = await readCode(page, 15000);
     if (!code) { await shot(page, 'code-notfound'); return { ok: false, message: 'Code not found in dialog' }; }
     await setCode(code);
@@ -572,7 +581,7 @@ async function getCode(forceFresh) {
   const codeAt = a2.code_at ? new Date(a2.code_at).getTime() : Date.now();
   const expiresAt = codeAt + CODE_TTL_MS;
   const validForMin = Math.max(0, Math.round((expiresAt - Date.now()) / 60000));
-  return { ok: true, code: a2.code, joinLink: JOIN_LINK, fetchedAt: new Date(codeAt).toISOString(), expiresAt: new Date(expiresAt).toISOString(), validForMin };
+  return { ok: true, code: a2.code, joinLink: JOIN_LINK, fetchedAt: new Date(codeAt).toISOString(), expiresAt: new Date(expiresAt).toISOString(), validForMin, controls: LAST_CONTROLS };
 }
 
 // ─── members read (full People list via search_brand_members, paginated by continuation) ───
@@ -893,6 +902,14 @@ initDb().then(() => {
   server.listen(PORT, HOST, () => log('canva-engine v2 (headful) listening on http://' + HOST + ':' + PORT + ' DISPLAY=' + process.env.DISPLAY));
   setInterval(() => heartbeat().catch(e => log('hb throw', e.message)), HEARTBEAT_MS);
   runRemoveWorker().catch(e => log('remove worker boot', e.message));  // resume any queued removals after a restart
-  // join watcher: every 20 min, only if someone is waiting to join, read members once (updates joined_at) — skips entirely when nothing is pending, to save proxy GB
-  setInterval(async () => { try { if (LOCK) return; if (await pendingJoinCount() > 0) { await fetchMembers(); } } catch (e) { log('join watcher', e.message); } }, 20 * 60 * 1000);
+  // join watcher: checks every 2 min. Fast lane — a delivery/resend in the last 30 min polls every tick so joins confirm in ~2 min. Stale pending drops to a 20-min cadence to spare proxy GB. Nothing pending = no fetch.
+  let LAST_SLOW_MEMBERS = 0;
+  setInterval(async () => {
+    try {
+      if (LOCK) return;
+      if (await pendingJoinCount() <= 0) return;
+      const young = (await db.query("SELECT 1 FROM canva_allowlist WHERE source='order' AND joined_at IS NULL AND (expires_at IS NULL OR expires_at>NOW()) AND last_sent_at > NOW() - INTERVAL '30 minutes' LIMIT 1")).rows.length > 0;
+      if (young || Date.now() - LAST_SLOW_MEMBERS > 20 * 60 * 1000) { await fetchMembers(); if (!young) LAST_SLOW_MEMBERS = Date.now(); }
+    } catch (e) { log('join watcher', e.message); }
+  }, 2 * 60 * 1000);
 }).catch(e => { log('initDb failed', e.message); process.exit(1); });

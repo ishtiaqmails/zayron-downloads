@@ -106,11 +106,14 @@ async function deliver(sock, order, product) {
 // customer typed a keyword → resend a fresh code if they have a paid, not-yet-joined Canva order
 async function maybeResendForText(sock, jid, phone, textLower) {
   if (!(await isEnabled())) return false;
-  if (!['canva', 'canva code', 'get code', 'resend code', 'canva join'].includes(textLower)) return false;
-  const ph = normPhone(phone);
-  const r = await db.query("SELECT email FROM canva_allowlist WHERE customer_phone=$1 AND joined_at IS NULL AND (expires_at IS NULL OR expires_at>NOW()) ORDER BY added_at DESC LIMIT 1", [ph]);
+  if (!['canva', 'canva code', 'get code', 'resend code', 'canva join', 'join code'].includes(textLower)) return false;
+  const ph = normPhone(phone), suf = ph.slice(-10);
+  // tolerant match: exact phone OR last-10-digits (handles country-code / LID differences)
+  const r = await db.query("SELECT email, joined_at, expires_at FROM canva_allowlist WHERE (customer_phone=$1 OR right(customer_phone,10)=$2) AND (expires_at IS NULL OR expires_at>NOW()) ORDER BY added_at DESC LIMIT 1", [ph, suf]);
   if (!r.rows.length) return false;
-  await sendCodeTo(sock, jid, r.rows[0].email, true);
+  const row = r.rows[0];
+  if (row.joined_at) await sock.sendMessage(jid, { text: joinedMsg(row.email, row.expires_at) });
+  else await sendCodeTo(sock, jid, row.email, true);
   return true;
 }
 
