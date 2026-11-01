@@ -555,30 +555,33 @@ async function removeMember(email) {
     await restoreStorage(page, acct.storage_state);
     if (!await isLoggedIn(page)) { await setState('needs_relogin'); return { ok: false, result: 'needs_relogin', message: 'Session expired' }; }
     await page.goto('https://www.canva.com/settings/people', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-    await sleep(8000);
-    // confirm the member exists first
+    // confirm the member exists first (API)
     const existsBefore = await page.evaluate(async (email) => { try { const r = await fetch('/_ajax/profilesearch/search_brand_members?searchEmail=' + encodeURIComponent(email) + '&projection=B&projection=C&projection=D&limit=10', { credentials: 'include' }); let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); const j = JSON.parse(t); return (j.results || []).some(m => m.C && String(m.C.email || '').toLowerCase() === email); } catch (e) { return null; } }, email);
     if (existsBefore === false) return { ok: false, result: 'not_found', message: 'Member not in team: ' + email };
-    // type email into the People search box
+    // WAIT until the People UI actually renders (search box present) — slow through the proxy
+    let rendered = false;
+    for (let i = 0; i < 30 && !rendered; i++) { await sleep(1000); rendered = await page.evaluate(() => [...document.querySelectorAll('input')].some(x => /search/i.test((x.getAttribute('placeholder') || '') + (x.getAttribute('aria-label') || ''))) ).catch(() => false); }
+    log('remove: people UI rendered=' + rendered);
+    // type email into the People search box to filter to just this member
     const typed = await page.evaluate(() => { const i = [...document.querySelectorAll('input')].find(x => { const ph = ((x.getAttribute('placeholder') || '') + ' ' + (x.getAttribute('aria-label') || '')).toLowerCase(); return /search/.test(ph) && /member|name|email/.test(ph); }); if (i) { i.focus(); return true; } return false; });
-    if (typed) { await page.keyboard.type(email, { delay: 45 }); await sleep(4000); }
+    if (typed) { await page.keyboard.type(email, { delay: 45 }); await sleep(4500); }
     // locate the member's row by its email cell, then click its checkbox (left edge) with a real mouse click
     const target = await page.evaluate((email) => {
       const nodes = [...document.querySelectorAll('span,td,a,p,div')];
-      let cell = null;
-      for (const n of nodes) { if ((n.textContent || '').trim().toLowerCase() === email) { cell = n; break; } }
+      let cell = null, best = 1e9;
+      for (const n of nodes) { const t = (n.textContent || '').trim().toLowerCase(); if (t.includes(email) && t.length < 80 && t.length < best) { const r = n.getBoundingClientRect(); if (r.width > 0 && r.height > 0) { cell = n; best = t.length; } } }
       if (!cell) return null;
       let row = cell;
       for (let k = 0; k < 8; k++) { const r = row.getBoundingClientRect(); if (r.width > 500) break; if (!row.parentElement) break; row = row.parentElement; }
       const r = row.getBoundingClientRect();
-      return { cx: Math.round(r.left + 22), cy: Math.round((r.top + r.bottom) / 2) };
+      return { cx: Math.round(r.left + 22), cy: Math.round((r.top + r.bottom) / 2), rowW: Math.round(r.width) };
     }, email);
     const selected = !!target;
     if (target) { await page.mouse.click(target.cx, target.cy); }
     await sleep(2500);
-    // dump + click the trash in the floating bulk-action bar (trash is the last action icon, just before the close X)
+    // dump + click the trash in the floating bulk-action bar (exclude left sidebar; trash is before the close X)
     const del = await page.evaluate(() => {
-      const btns = [...document.querySelectorAll('button,[role=button]')].filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top > (window.innerHeight - 190); });
+      const btns = [...document.querySelectorAll('button,[role=button]')].filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top > (window.innerHeight - 190) && r.left > 300; });
       const bar = btns.map(b => { const r = b.getBoundingClientRect(); return { x: Math.round(r.left), al: (b.getAttribute('aria-label') || '').slice(0, 24) }; });
       let clicked = 'none';
       if (btns.length >= 2) { btns[btns.length - 2].click(); clicked = 'idx' + (btns.length - 2) + '/' + btns.length; }
