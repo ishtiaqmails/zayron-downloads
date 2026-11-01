@@ -277,7 +277,7 @@ async function alreadyInvited(page, brand, target) {
 }
 async function openInviteDialog(page) {
   let clicked = false;
-  for (let i = 0; i < 20 && !clicked; i++) {
+  for (let i = 0; i < 45 && !clicked; i++) {
     clicked = await page.evaluate(() => {
       const els = [...document.querySelectorAll('button,[role=button]')];
       let best = els.find(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && /^invite students$/i.test((e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim()); });
@@ -293,7 +293,7 @@ async function openInviteDialog(page) {
     await clickByText(page, ['teams', 'team']); await sleep(900);
     await clickByText(page, ['invite people', 'invite members', 'invite students']); await sleep(1200);
   }
-  return await waitInviteField(page, 12000);
+  return await waitInviteField(page, 20000);
 }
 async function waitInviteField(page, ms) {
   const deadline = Date.now() + ms;
@@ -337,7 +337,7 @@ async function invite(customerEmail) {
     let createOk = false, createBody = null, createSeen = false;
     onResp = async (res) => { try { const u = res.url(); if (/invitations\/create/.test(u)) { createSeen = true; const t = await res.text(); createBody = t; if (res.status() >= 200 && res.status() < 300 && t && t.toLowerCase().includes(target)) createOk = true; } } catch (e) {} };
     page.on('response', onResp);
-    if (!await openInviteDialog(page)) { await shot(page, 'invite-nodialog'); return { ok: false, result: 'error', message: 'Could not open the invite dialog (button or email field not found)' }; }
+    if (!await openInviteDialog(page)) { await shot(page, 'invite-nodialog'); const dbg = await page.evaluate(() => ({ url: location.href, title: document.title, buttons: [...new Set([...document.querySelectorAll('button,[role=button]')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).map(e => (e.innerText || '').replace(/\s+/g, ' ').trim()).filter(t => t && t.length < 40))].slice(0, 30) })).catch(() => null); return { ok: false, result: 'error', message: 'Could not open the invite dialog (button or email field not found)', detail: dbg }; }
     if (!await typeEmail(page, customerEmail.trim())) { await shot(page, 'invite-nofield'); return { ok: false, result: 'error', message: 'Email field not found' }; }
     await sleep(1200);
     if (!await clickSend(page, 8000)) { await shot(page, 'invite-nosend'); return { ok: false, result: 'error', message: 'Send invitations button did not appear (email invalid?)' }; }
