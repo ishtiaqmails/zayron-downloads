@@ -59,10 +59,23 @@ async function initDb() {
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS code text`);
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS code_at timestamptz`);
   await db.query(`INSERT INTO canva_account (id, state) VALUES (1, 'none') ON CONFLICT (id) DO NOTHING`);
+  await db.query(`CREATE TABLE IF NOT EXISTS canva_allowlist (
+    email text PRIMARY KEY,
+    source text NOT NULL DEFAULT 'manual',      -- order|manual
+    order_ref text,
+    note text,
+    added_at timestamptz NOT NULL DEFAULT NOW()
+  )`);
 }
 async function getAccount() { const r = await db.query('SELECT * FROM canva_account WHERE id=1'); return r.rows[0] || { state: 'none' }; }
 async function getBrand() { if (process.env.CANVA_BRAND) return process.env.CANVA_BRAND; const a = await getAccount(); return (a && a.brand) || DEFAULT_BRAND; }
 async function getProxyRaw() { if (process.env.CANVA_PROXY) return process.env.CANVA_PROXY; const a = await getAccount(); return (a && a.proxy) || ''; }
+// ─── allowlist (authorized emails = paid orders + manual additions) ───
+function normEmail(e) { return String(e || '').trim().toLowerCase(); }
+async function listAllow() { const r = await db.query('SELECT email, source, order_ref, note, added_at FROM canva_allowlist ORDER BY added_at DESC'); return r.rows; }
+async function addAllow(email, source, orderRef, note) { email = normEmail(email); if (!email || !email.includes('@')) return false; await db.query('INSERT INTO canva_allowlist(email,source,order_ref,note) VALUES($1,$2,$3,$4) ON CONFLICT(email) DO UPDATE SET source=EXCLUDED.source, order_ref=COALESCE(EXCLUDED.order_ref,canva_allowlist.order_ref), note=COALESCE(EXCLUDED.note,canva_allowlist.note)', [email, source || 'manual', orderRef || null, note || null]); return true; }
+async function removeAllow(email) { await db.query('DELETE FROM canva_allowlist WHERE email=$1', [normEmail(email)]); return true; }
+async function allowSet() { const r = await db.query('SELECT email FROM canva_allowlist'); return new Set(r.rows.map(x => normEmail(x.email))); }
 // parse "http://user:pass@host:port" | "host:port" | "user:pass@host:port" -> {server,username,password} or null
 function parseProxy(s) { s = String(s || '').trim(); if (!s) return null; try { const u = new URL(s.includes('://') ? s : 'http://' + s); return { server: u.protocol + '//' + u.host, username: decodeURIComponent(u.username || ''), password: decodeURIComponent(u.password || '') }; } catch (e) { return null; } }
 let PROXY_CFG = null;
@@ -480,36 +493,45 @@ async function getCode(forceFresh) {
   return await fetchCode();
 }
 
-// ─── members read (People list via the brand members API; not reCAPTCHA-gated) ───
-async function fetchMembersRaw() {
+// ─── members read (full People list via search_brand_members, paginated by continuation) ───
+async function fetchMembers() {
   const acct = await getAccount();
   if (acct.state !== 'active' || !acct.storage_state) return { ok: false, message: 'No active Canva session' };
   await lock();
   const browser = await launch();
-  const captured = [];
   try {
     const page = await newPage(browser);
-    page.on('response', async (res) => {
-      try {
-        const u = res.url();
-        if (!/\/_ajax\//.test(u)) return;
-        const p = u.replace('https://www.canva.com', '').split('?')[0];
-        const q = (u.split('?')[1] || '').slice(0, 140);
-        let body = null;
-        if (/member|people|membership|profile\/v2\/brands/i.test(u)) { try { let t = await res.text(); if (t) { const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); } body = t ? t.slice(0, 900) : null; } catch (e) {} }
-        captured.push({ p, q, s: res.status(), body });
-      } catch (e) {}
-    });
     await restoreStorage(page, acct.storage_state);
     if (!await isLoggedIn(page)) { await setState('needs_relogin'); return { ok: false, result: 'needs_relogin', message: 'Session expired — re-import needed' }; }
-    await page.goto('https://www.canva.com/settings/people', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-    await sleep(9000);
-    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
-    await sleep(5000);
-    const memberish = captured.filter(c => c.body || /member|people|membership/i.test(c.p));
-    return { ok: true, allPaths: [...new Set(captured.map(c => c.s + ' ' + c.p))].slice(0, 40), memberish: memberish.slice(0, 6) };
-  } catch (e) { log('fetchMembersRaw error', e.message); return { ok: false, message: e.message }; }
+    const members = await page.evaluate(async () => {
+      const out = []; let cont = null; let guard = 0;
+      do {
+        const u = '/_ajax/profilesearch/search_brand_members?searchEmail=&projection=B&projection=C&projection=D&limit=50' + (cont ? ('&continuation=' + encodeURIComponent(cont)) : '');
+        const r = await fetch(u, { credentials: 'include' });
+        if (!r.ok) return { error: r.status };
+        let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i);
+        const j = JSON.parse(t);
+        const res = j.results || [];
+        for (const m of res) { const c = m.C || {}; const us = c.user || {}; out.push({ id: us.id || m.A || '', email: String(c.email || us.email || '').toLowerCase(), name: us.displayName || '', role: c.role || '', locked: !!c.locked }); }
+        cont = j.continuation || null;
+        if (res.length === 0) break;
+      } while (cont && guard++ < 300);
+      return out;
+    });
+    if (members && members.error) return { ok: false, message: 'members api status ' + members.error };
+    log('members fetched: ' + members.length);
+    return { ok: true, count: members.length, members };
+  } catch (e) { log('fetchMembers error', e.message); return { ok: false, message: e.message }; }
   finally { try { await browser.close(); } catch (e) {} unlock(); }
+}
+// Report-only reconcile: who is in the team but NOT on the allowlist (never OWNER / non-members).
+async function reconcile() {
+  const mem = await fetchMembers();
+  if (!mem.ok) return mem;
+  const allow = await allowSet();
+  const onlyMembers = mem.members.filter(m => m.role === 'MEMBER');
+  const candidates = onlyMembers.filter(m => m.email && !allow.has(m.email));
+  return { ok: true, total: mem.count, protectedNonMembers: mem.count - onlyMembers.length, authorizedEmails: allow.size, keep: mem.count - candidates.length, removeCandidates: candidates.map(c => ({ email: c.email, name: c.name, id: c.id })), mode: 'report-only' };
 }
 
 // ─── heartbeat (skips if a browser op is in progress) ───
@@ -538,7 +560,11 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/config') { const b = await readBody(req); if (!('brand' in b) && !('proxy' in b)) return send(res, 400, { ok: false, message: 'brand and/or proxy required' }); const extra = {}; if ('brand' in b) extra.brand = String(b.brand).trim(); if ('proxy' in b) extra.proxy = String(b.proxy).trim(); await setState((await getAccount()).state || 'none', extra); const a = await getAccount(); return send(res, 200, { ok: true, brand: a.brand || DEFAULT_BRAND, proxy: a.proxy ? 'set' : null }); }
     if (req.method === 'POST' && req.url === '/proxytest') { try { return send(res, 200, await proxyTest()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && (req.url === '/code' || req.url === '/code/refresh')) { try { return send(res, 200, await getCode(req.url.endsWith('refresh'))); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
-    if (req.method === 'GET' && req.url === '/members/raw') { try { return send(res, 200, await fetchMembersRaw()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && req.url === '/members') { try { return send(res, 200, await fetchMembers()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && req.url === '/reconcile') { try { return send(res, 200, await reconcile()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && req.url === '/allow') { try { return send(res, 200, { ok: true, allow: await listAllow() }); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'POST' && req.url === '/allow') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); const okk = await addAllow(b.email, b.source || 'manual', b.order_ref || null, b.note || null); return send(res, 200, { ok: okk, email: normEmail(b.email) }); }
+    if (req.method === 'POST' && req.url === '/allow/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); await removeAllow(b.email); return send(res, 200, { ok: true, removed: normEmail(b.email) }); }
     if (req.method === 'POST' && req.url === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
     if (req.method === 'POST' && req.url === '/session/clear') { try { return send(res, 200, await sessionClear()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && req.url === '/login/start') { const b = await readBody(req); if (!b.email) return send(res, 400, { state: 'error', message: 'email required' }); try { return send(res, 200, await loginStart(String(b.email).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }
