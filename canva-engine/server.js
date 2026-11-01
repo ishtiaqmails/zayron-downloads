@@ -492,18 +492,22 @@ async function fetchMembersRaw() {
     page.on('response', async (res) => {
       try {
         const u = res.url();
-        if (/\/(brands|teams)\/[^/]+\/(members|people)/i.test(u) || /\/membership/i.test(u)) {
-          let t = null; try { t = await res.text(); } catch (e) {}
-          if (t) { const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); }
-          captured.push({ url: u.replace('https://www.canva.com', ''), status: res.status(), body: t ? t.slice(0, 1100) : null });
-        }
+        if (!/\/_ajax\//.test(u)) return;
+        const p = u.replace('https://www.canva.com', '').split('?')[0];
+        const q = (u.split('?')[1] || '').slice(0, 140);
+        let body = null;
+        if (/member|people|membership|profile\/v2\/brands/i.test(u)) { try { let t = await res.text(); if (t) { const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); } body = t ? t.slice(0, 900) : null; } catch (e) {} }
+        captured.push({ p, q, s: res.status(), body });
       } catch (e) {}
     });
     await restoreStorage(page, acct.storage_state);
     if (!await isLoggedIn(page)) { await setState('needs_relogin'); return { ok: false, result: 'needs_relogin', message: 'Session expired — re-import needed' }; }
     await page.goto('https://www.canva.com/settings/people', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await sleep(9000);
-    return { ok: true, captured: captured.slice(0, 6) };
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+    await sleep(5000);
+    const memberish = captured.filter(c => c.body || /member|people|membership/i.test(c.p));
+    return { ok: true, allPaths: [...new Set(captured.map(c => c.s + ' ' + c.p))].slice(0, 40), memberish: memberish.slice(0, 6) };
   } catch (e) { log('fetchMembersRaw error', e.message); return { ok: false, message: e.message }; }
   finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
