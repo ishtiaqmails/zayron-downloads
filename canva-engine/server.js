@@ -484,25 +484,26 @@ async function getCode(forceFresh) {
 async function fetchMembersRaw() {
   const acct = await getAccount();
   if (acct.state !== 'active' || !acct.storage_state) return { ok: false, message: 'No active Canva session' };
-  const brand = await getBrand();
   await lock();
   const browser = await launch();
+  const captured = [];
   try {
     const page = await newPage(browser);
+    page.on('response', async (res) => {
+      try {
+        const u = res.url();
+        if (/\/(brands|teams)\/[^/]+\/(members|people)/i.test(u) || /\/membership/i.test(u)) {
+          let t = null; try { t = await res.text(); } catch (e) {}
+          if (t) { const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); }
+          captured.push({ url: u.replace('https://www.canva.com', ''), status: res.status(), body: t ? t.slice(0, 1100) : null });
+        }
+      } catch (e) {}
+    });
     await restoreStorage(page, acct.storage_state);
     if (!await isLoggedIn(page)) { await setState('needs_relogin'); return { ok: false, result: 'needs_relogin', message: 'Session expired — re-import needed' }; }
-    const data = await page.evaluate(async (brand) => {
-      try {
-        const u = '/_ajax/profile/v2/brands/' + encodeURIComponent(brand) + '/members?limit=100';
-        const r = await fetch(u, { headers: { accept: 'application/json' }, credentials: 'include' });
-        let text = await r.text();
-        const i = text.search(/[\[{]/); if (i > 0) text = text.slice(i);   // strip anti-hijack prefix like )]}' or '])}while(1);
-        const j = JSON.parse(text);
-        const arr = Array.isArray(j.A) ? j.A : (Array.isArray(j) ? j : (Object.values(j).find(v => Array.isArray(v)) || []));
-        return { status: r.status, topKeys: Object.keys(j), count: arr.length, sample: JSON.stringify(arr.slice(0, 2)).slice(0, 1400), tail: JSON.stringify(j).slice(-180) };
-      } catch (e) { return { error: String(e) }; }
-    }, brand);
-    return { ok: true, data };
+    await page.goto('https://www.canva.com/settings/people', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await sleep(9000);
+    return { ok: true, captured: captured.slice(0, 6) };
   } catch (e) { log('fetchMembersRaw error', e.message); return { ok: false, message: e.message }; }
   finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
