@@ -562,21 +562,20 @@ async function removeMember(email) {
     // type email into the People search box
     const typed = await page.evaluate(() => { const i = [...document.querySelectorAll('input')].find(x => { const ph = ((x.getAttribute('placeholder') || '') + ' ' + (x.getAttribute('aria-label') || '')).toLowerCase(); return /search/.test(ph) && /member|name|email/.test(ph); }); if (i) { i.focus(); return true; } return false; });
     if (typed) { await page.keyboard.type(email, { delay: 45 }); await sleep(4000); }
-    // select the checkbox in the row that contains the target email (works filtered or unfiltered)
+    // select the target member's checkbox by climbing from each checkbox to a row containing the email (cheap: few checkboxes)
     const selected = await page.evaluate((email) => {
-      const all = [...document.querySelectorAll('tr,[role=row],li,div')];
-      const rows = all.filter(r => { const txt = (r.innerText || '').toLowerCase(); return txt.includes(email) && r.querySelector('input[type=checkbox],[role=checkbox]') && (r.innerText || '').length < 220; });
-      rows.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
-      const row = rows[0]; if (!row) return false;
-      const cb = row.querySelector('input[type=checkbox],[role=checkbox]');
-      if (cb) { cb.click(); return true; }
+      const cbs = [...document.querySelectorAll('input[type=checkbox],[role=checkbox]')];
+      for (const cb of cbs) {
+        const r = cb.getBoundingClientRect(); if (!(r.width > 0 && r.height > 0)) continue;
+        let el = cb;
+        for (let k = 0; k < 7 && el; k++) { el = el.parentElement; if (el && (el.innerText || '').toLowerCase().includes(email)) { cb.click(); return true; } }
+      }
       return false;
     }, email);
     await sleep(2000);
-    // click the trash/delete button in the floating bulk-action bar (it's the last icon)
+    // click the trash/delete icon in the floating bulk-action bar (bottom strip; it's the last icon)
     const del = await page.evaluate(() => {
-      let bar = [...document.querySelectorAll('div,section,footer')].find(e => /\bselected\b/i.test(e.innerText || '') && e.getBoundingClientRect().top > 480 && e.querySelectorAll('button,[role=button]').length >= 2);
-      let btns = (bar ? [...bar.querySelectorAll('button,[role=button]')] : [...document.querySelectorAll('button,[role=button]')].filter(b => b.getBoundingClientRect().top > 540)).filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+      const btns = [...document.querySelectorAll('button,[role=button]')].filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top > (window.innerHeight - 170) && r.bottom <= window.innerHeight + 5; });
       if (!btns.length) return 'no-bar';
       btns[btns.length - 1].click();
       return 'clicked-last-of-' + btns.length;
