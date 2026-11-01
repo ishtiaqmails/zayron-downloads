@@ -70,6 +70,19 @@ async function initDb() {
   )`);
   await db.query(`ALTER TABLE canva_allowlist ADD COLUMN IF NOT EXISTS expires_at timestamptz`);  // order entries expire (1yr); manual = NULL = permanent
   await db.query(`ALTER TABLE canva_allowlist ADD COLUMN IF NOT EXISTS joined_at timestamptz`);    // set when the email actually appears in the team (join confirmed)
+  await db.query(`ALTER TABLE canva_allowlist ADD COLUMN IF NOT EXISTS customer_phone text`);      // WhatsApp number for the order, so the bot can resend/remind
+  await db.query(`ALTER TABLE canva_allowlist ADD COLUMN IF NOT EXISTS reminders_sent int NOT NULL DEFAULT 0`);
+  await db.query(`ALTER TABLE canva_allowlist ADD COLUMN IF NOT EXISTS last_sent_at timestamptz`);
+  await db.query(`CREATE TABLE IF NOT EXISTS canva_outbox (
+    id serial PRIMARY KEY,
+    kind text NOT NULL DEFAULT 'resend',
+    email text,
+    phone text,
+    status text NOT NULL DEFAULT 'queued',   -- queued|done|failed
+    message text,
+    created_at timestamptz NOT NULL DEFAULT NOW(),
+    done_at timestamptz
+  )`);
   await db.query(`CREATE TABLE IF NOT EXISTS canva_remove_queue (
     email text PRIMARY KEY,
     status text NOT NULL DEFAULT 'queued',       -- queued|working|done|failed
@@ -96,12 +109,17 @@ async function getProxyRaw() { if (process.env.CANVA_PROXY) return process.env.C
 // ─── allowlist (authorized emails = paid orders + manual additions) ───
 function normEmail(e) { return String(e || '').trim().toLowerCase(); }
 const TERM_DAYS = 365;  // paid Canva order = 1 year of access
-async function listAllow() { const r = await db.query('SELECT email, source, order_ref, note, added_at, expires_at, joined_at FROM canva_allowlist ORDER BY added_at DESC'); return r.rows; }
+async function listAllow() { const r = await db.query('SELECT email, source, order_ref, note, added_at, expires_at, joined_at, customer_phone FROM canva_allowlist ORDER BY added_at DESC'); return r.rows; }
 // confirm joins: any allowlisted email that now appears in the team gets joined_at stamped (called on every members read — no extra bandwidth)
 async function markJoins(members) { try { const emails = (members || []).map(m => normEmail(m.email)).filter(Boolean); if (!emails.length) return; await db.query('UPDATE canva_allowlist SET joined_at = COALESCE(joined_at, NOW()) WHERE joined_at IS NULL AND email = ANY($1::text[])', [emails]); } catch (e) { log('markJoins', e.message); } }
 async function pendingJoinCount() { try { const r = await db.query("SELECT COUNT(*)::int n FROM canva_allowlist WHERE joined_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())"); return r.rows[0].n; } catch (e) { return 0; } }
 // expiresAt: explicit ISO/Date, or undefined => auto (orders get now+TERM_DAYS, manual stays permanent/NULL)
-async function addAllow(email, source, orderRef, note, expiresAt) { email = normEmail(email); if (!email || !email.includes('@')) return false; source = source || 'manual'; let exp = (expiresAt === undefined) ? (source === 'order' ? new Date(Date.now() + TERM_DAYS * 86400000) : null) : (expiresAt ? new Date(expiresAt) : null); await db.query('INSERT INTO canva_allowlist(email,source,order_ref,note,expires_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(email) DO UPDATE SET source=EXCLUDED.source, order_ref=COALESCE(EXCLUDED.order_ref,canva_allowlist.order_ref), note=COALESCE(EXCLUDED.note,canva_allowlist.note), expires_at=EXCLUDED.expires_at', [email, source, orderRef || null, note || null, exp]); return true; }
+async function addAllow(email, source, orderRef, note, expiresAt, customerPhone) { email = normEmail(email); if (!email || !email.includes('@')) return false; source = source || 'manual'; let exp = (expiresAt === undefined) ? (source === 'order' ? new Date(Date.now() + TERM_DAYS * 86400000) : null) : (expiresAt ? new Date(expiresAt) : null); const ph = customerPhone ? String(customerPhone).replace(/[^0-9]/g, '') : null; await db.query('INSERT INTO canva_allowlist(email,source,order_ref,note,expires_at,customer_phone) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(email) DO UPDATE SET source=EXCLUDED.source, order_ref=COALESCE(EXCLUDED.order_ref,canva_allowlist.order_ref), note=COALESCE(EXCLUDED.note,canva_allowlist.note), expires_at=EXCLUDED.expires_at, customer_phone=COALESCE(EXCLUDED.customer_phone,canva_allowlist.customer_phone)', [email, source, orderRef || null, note || null, exp, ph]); return true; }
+// bot-delivery config lives in bot_settings (same DB); the dashboard toggles it, the bot reads it
+async function getBotCfg() { const r = await db.query("SELECT key, value FROM bot_settings WHERE key = ANY($1::text[])", [['canva_enabled', 'canva_delivery_mode', 'canva_product_id']]); const m = {}; r.rows.forEach(x => m[x.key] = x.value); return { canva_enabled: String(m.canva_enabled || '0') === '1', canva_delivery_mode: m.canva_delivery_mode || 'vendor', canva_product_id: parseInt(m.canva_product_id || '0', 10) || 0 }; }
+async function setBotCfg(b) { const up = (k, v) => db.query("INSERT INTO bot_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2", [k, String(v)]); if ('canva_enabled' in b) await up('canva_enabled', b.canva_enabled ? '1' : '0'); if ('canva_delivery_mode' in b) await up('canva_delivery_mode', b.canva_delivery_mode === 'engine' ? 'engine' : 'vendor'); if ('canva_product_id' in b) await up('canva_product_id', parseInt(b.canva_product_id, 10) || 0); return await getBotCfg(); }
+// dashboard "Resend code" → queue a send the bot's scheduler will pick up (only the bot can send WhatsApp)
+async function resendRequest(email) { email = normEmail(email); if (!email) return { ok: false, message: 'email required' }; const r = await db.query('SELECT customer_phone FROM canva_allowlist WHERE email=$1', [email]); const phone = r.rows[0] && r.rows[0].customer_phone; if (!phone) return { ok: false, message: 'No customer phone on file for this email — use “Give to a customer” to send it.' }; await db.query("INSERT INTO canva_outbox(kind,email,phone,status) VALUES('resend',$1,$2,'queued')", [email, phone]); return { ok: true, queued: email }; }
 async function removeAllow(email) { await db.query('DELETE FROM canva_allowlist WHERE email=$1', [normEmail(email)]); return true; }
 async function allowSet() { const r = await db.query('SELECT email FROM canva_allowlist WHERE expires_at IS NULL OR expires_at > NOW()'); return new Set(r.rows.map(x => normEmail(x.email))); }
 // parse "http://user:pass@host:port" | "host:port" | "user:pass@host:port" -> {server,username,password} or null
@@ -849,7 +867,10 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/members') { try { return send(res, 200, await fetchMembers()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && path === '/reconcile') { try { return send(res, 200, await reconcile()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && path === '/allow') { try { return send(res, 200, { ok: true, allow: await listAllow() }); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
-    if (req.method === 'POST' && path === '/allow') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); const okk = await addAllow(b.email, b.source || 'manual', b.order_ref || null, b.note || null); return send(res, 200, { ok: okk, email: normEmail(b.email) }); }
+    if (req.method === 'POST' && path === '/allow') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); const okk = await addAllow(b.email, b.source || 'manual', b.order_ref || null, b.note || null, undefined, b.customer_phone || null); return send(res, 200, { ok: okk, email: normEmail(b.email) }); }
+    if (req.method === 'GET' && path === '/botcfg') { try { return send(res, 200, { ok: true, cfg: await getBotCfg() }); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'POST' && path === '/botcfg') { const b = await readBody(req); try { return send(res, 200, { ok: true, cfg: await setBotCfg(b) }); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'POST' && path === '/resend') { const b = await readBody(req); try { return send(res, 200, await resendRequest(b.email)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/allow/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); await removeAllow(b.email); return send(res, 200, { ok: true, removed: normEmail(b.email) }); }
     if (req.method === 'POST' && path === '/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); try { return send(res, 200, await removeMember(b.email)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/remove/batch') { const b = await readBody(req); try { return send(res, 200, await queueRemovals(b.emails || [])); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }

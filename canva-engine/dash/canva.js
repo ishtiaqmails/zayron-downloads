@@ -52,7 +52,8 @@ function cvRenderAllow(){
   document.getElementById('cv-allow-count').innerHTML=CV.allow.length+' · <span style="color:#059669;">'+joined+' joined</span>';
   cvPage(rows, 'cv-allow-body', 'cv-allow-pager', CV.allowPage, 6, function(np){CV.allowPage=np;cvRenderAllow();}, function(x){
     var src=x.source==='order'?'<span class="cv-pill order">order</span>':'<span class="cv-pill">manual</span>';
-    return '<tr><td>'+cvEsc(x.email)+'</td><td>'+src+(x.order_ref?' '+cvEsc(x.order_ref):'')+'</td><td style="color:#9ca3af;">'+cvWhen(x.added_at)+'</td><td>'+cvAccess(x)+'</td><td>'+cvJoined(x)+'</td><td style="text-align:right;"><button class="cv-btn danger sm" onclick="cvDelAllow(\''+cvEsc(x.email)+'\')">Remove</button></td></tr>';
+    var resend=(!x.joined_at && x.customer_phone)?'<button class="cv-btn ghost sm" onclick="cvResend(\''+cvEsc(x.email)+'\')">Resend</button> ':'';
+    return '<tr><td>'+cvEsc(x.email)+'</td><td>'+src+(x.order_ref?' '+cvEsc(x.order_ref):'')+'</td><td style="color:#9ca3af;">'+cvWhen(x.added_at)+'</td><td>'+cvAccess(x)+'</td><td>'+cvJoined(x)+'</td><td style="text-align:right;white-space:nowrap;">'+resend+'<button class="cv-btn danger sm" onclick="cvDelAllow(\''+cvEsc(x.email)+'\')">Remove</button></td></tr>';
   });
 }
 function cvAddAllow(){
@@ -158,5 +159,23 @@ function cvProxyTest(btn){ if(btn){btn.disabled=true;btn.textContent='Testing…
 function cvSetQuota(){ var mb=parseInt((document.getElementById('cv-px-quota').value||'').trim(),10); if(!mb){cvToast('Enter quota in MB');return;} cvPost('/proxy/quota',{quotaMb:mb}).then(function(){cvToast('Quota saved');cvLoadProxy();}); }
 function cvResetUsage(){ if(!confirm('Reset the usage counter to zero?\nDo this right after you top up / buy new GB from IPRoyal.'))return; cvPost('/proxy/reset',{}).then(function(){cvToast('Usage reset');cvLoadProxy();}); }
 
-cvLoadStatus(); cvLoadCode(false); cvLoadAllow(); cvLoadProxy();
+// ── delivery mode (engine vs old vendor) + resend ──
+function cvLoadMode(){ cvGet('/botcfg').then(function(r){ if(!r.ok||!r.cfg)return; var c=r.cfg;
+  document.getElementById('cv-enabled').checked=!!c.canva_enabled;
+  document.getElementById('cv-mode-engine').classList.toggle('on',c.canva_delivery_mode==='engine');
+  document.getElementById('cv-mode-vendor').classList.toggle('on',c.canva_delivery_mode!=='engine');
+  var pid=document.getElementById('cv-pid'); if(pid && !pid.value && c.canva_product_id) pid.value=c.canva_product_id;
+  document.getElementById('cv-mode-hint').textContent=c.canva_product_id?('product #'+c.canva_product_id):'set product ID';
+  document.getElementById('cv-mode-note').innerHTML = !c.canva_enabled
+    ? '⚪ Automation is OFF — Canva orders behave exactly as before (old vendor flow). Nothing is auto-sent.'
+    : (c.canva_delivery_mode==='engine'
+      ? '✅ Orders deliver automatically: email saved (1 yr), code + link sent, reminders until they join.'
+      : '↩️ Automation on, but delivery is set to your old vendor flow.');
+}); }
+function cvSetMode(m){ cvPost('/botcfg',{canva_delivery_mode:m}).then(function(){cvToast('Delivery: '+(m==='engine'?'Automatic':'Old vendor'));cvLoadMode();}); }
+function cvToggleEnabled(el){ cvPost('/botcfg',{canva_enabled:el.checked}).then(function(){cvToast(el.checked?'Automation ON':'Automation OFF');cvLoadMode();}); }
+function cvSetPid(){ var v=parseInt((document.getElementById('cv-pid').value||'').trim(),10); if(!v){cvToast('Enter the product ID');return;} cvPost('/botcfg',{canva_product_id:v}).then(function(){cvToast('Product saved');cvLoadMode();}); }
+function cvResend(email){ cvPost('/resend',{email:email}).then(function(r){ cvToast(r.ok?'Queued — the bot will send it shortly':(r.message||'Could not resend')); }); }
+
+cvLoadStatus(); cvLoadCode(false); cvLoadAllow(); cvLoadProxy(); cvLoadMode();
 setInterval(cvTickExp, 30000); setInterval(cvLoadStatus, 60000); setInterval(cvLoadProxy, 60000);

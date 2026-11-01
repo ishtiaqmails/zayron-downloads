@@ -37,4 +37,7 @@ module.exports = function (app, requireAuth) {
   app.post('/canva/api/proxy/quota',  requireAuth, async (req, res) => pass(res, await engineReq('POST', '/proxy/quota', req.body)));
   app.post('/canva/api/proxy/reset',  requireAuth, async (req, res) => pass(res, await engineReq('POST', '/proxy/reset', req.body)));
   app.post('/canva/api/proxytest',    requireAuth, async (req, res) => pass(res, await engineReq('POST', '/proxytest', {})));
+  app.get('/canva/api/botcfg',        requireAuth, async (req, res) => pass(res, await engineReq('GET', '/botcfg')));
+  app.post('/canva/api/botcfg',       requireAuth, async (req, res) => pass(res, await engineReq('POST', '/botcfg', req.body)));
+  app.post('/canva/api/resend',       requireAuth, async (req, res) => pass(res, await engineReq('POST', '/resend', req.body)));
 };
