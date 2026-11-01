@@ -189,9 +189,13 @@ async function challengedNow(page) { return await page.evaluate(() => { const t 
 async function passCloudflare(page) {
   if (!await challengedNow(page)) return true;
   log('cloudflare challenge — waiting for the browser to clear it');
-  for (let i = 0; i < 40; i++) {
+  // Require a STABLE clear (3 consecutive clear checks ~4.5s) — a single clear check can be a
+  // transient redirect state. Cloudflare may re-issue challenges; keep solving through them.
+  let streak = 0;
+  for (let i = 0; i < 70; i++) {
     await sleep(1500);
-    if (!await challengedNow(page)) { log('cloudflare cleared (js challenge)'); return true; }
+    if (!await challengedNow(page)) { if (++streak >= 3) { log('cloudflare cleared (stable)'); return true; } continue; }
+    streak = 0;
     const p = await page.evaluate(() => window.__cf).catch(() => null);
     if (p && p.sitekey) {
       try { const token = await solveTurnstileParams(p, page.url()); await page.evaluate((tok) => { try { if (typeof window.__cfCb === 'function') window.__cfCb(tok); } catch (e) {} }, token); log('cloudflare turnstile solved'); }
