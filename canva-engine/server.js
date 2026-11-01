@@ -395,7 +395,14 @@ async function invite(customerEmail) {
     log('inv[' + dt() + ']: dialog opened');
     if (!await typeEmail(page, customerEmail.trim())) { await shot(page, 'invite-nofield'); return { ok: false, result: 'error', message: 'Email field not found' }; }
     log('inv[' + dt() + ']: email typed');
-    await sleep(1200);
+    await sleep(1800);
+    const dlg = await page.evaluate(() => {
+      const inputs = [...document.querySelectorAll('input')].filter(i => i.getBoundingClientRect().width > 0).map(i => ({ al: (i.getAttribute('aria-label') || '').slice(0, 30), ph: (i.placeholder || '').slice(0, 25), val: i.value || '' }));
+      const sendBtn = [...document.querySelectorAll('button,[role=button]')].some(e => /send invitations?/i.test((e.innerText || '').replace(/\s+/g, ' ').trim()));
+      const d = [...document.querySelectorAll('[role=dialog],[aria-modal=true]')].map(x => (x.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 180))[0] || '';
+      return { inputs: inputs.slice(0, 8), sendBtn, dialog: d };
+    }).catch(() => null);
+    log('inv[' + dt() + ']: dialogstate ' + JSON.stringify(dlg));
     const sent = await clickSend(page, 15000);
     log('inv[' + dt() + ']: send clicked=' + sent);
     if (!sent) { await shot(page, 'invite-nosend'); return { ok: false, result: 'error', message: 'Send invitations button did not appear (email invalid?)' }; }
