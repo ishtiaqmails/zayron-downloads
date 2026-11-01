@@ -34,6 +34,8 @@ try {
 const db = require('/opt/galaxybot/src/db');
 let captcha = null;
 try { captcha = require('/opt/galaxybot/src/services/captchaService'); } catch (e) { /* set later */ }
+let axios = null;
+try { axios = require('/opt/galaxybot/node_modules/axios'); } catch (e) { try { axios = require('axios'); } catch (_) {} }
 
 const PORT = 4011, HOST = '0.0.0.0';
 const BASE = process.env.LION_BASE || 'https://bqpanel.com';
@@ -143,8 +145,54 @@ async function newPage(browser) {
   if (PROXY_CFG && (PROXY_CFG.username || PROXY_CFG.password)) { try { await page.authenticate({ username: PROXY_CFG.username, password: PROXY_CFG.password }); } catch (e) { log('proxy auth warn', e.message); } }
   await page.setUserAgent(UA);
   await page.setViewport({ width: 1366, height: 900 });
+  // hook Cloudflare's Turnstile so a challenge page exposes its params (sitekey/action/cData/pagedata)
+  await page.evaluateOnNewDocument(() => {
+    try {
+      window.__cf = null; window.__cfCb = null; let real;
+      const wrap = (ts) => { if (!ts || ts.__w) return ts; const orig = ts.render && ts.render.bind(ts); if (orig) { ts.render = (el, opts) => { try { window.__cf = { sitekey: opts.sitekey, action: opts.action, cData: opts.cData, chlPageData: opts.chlPageData, pagedata: opts.pagedata }; window.__cfCb = opts.callback; } catch (e) {} return orig(el, opts); }; } ts.__w = true; return ts; };
+      Object.defineProperty(window, 'turnstile', { configurable: true, get() { return real; }, set(v) { real = wrap(v); } });
+    } catch (e) {}
+  }).catch(() => {});
   return page;
 }
+// ─── Cloudflare managed-challenge solver (reuses the bot's 2captcha key from bot_settings) ───
+async function twocaptchaKey() { const r = await db.query("SELECT value FROM bot_settings WHERE key='twocaptcha_api_key'"); if (!r.rows[0]) throw new Error('2captcha key missing in bot_settings'); return r.rows[0].value; }
+async function solveTurnstileParams(params, pageurl) {
+  if (!axios) throw new Error('axios unavailable');
+  const key = await twocaptchaKey();
+  const body = new URLSearchParams({ key, json: '1', method: 'turnstile', sitekey: params.sitekey, pageurl, useragent: UA });
+  if (params.action) body.set('action', params.action);
+  if (params.cData) body.set('data', params.cData);
+  const pd = params.chlPageData || params.pagedata; if (pd) body.set('pagedata', pd);
+  const sub = await axios.post('https://2captcha.com/in.php', body.toString(), { headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, timeout: 30000 });
+  if (sub.data.status !== 1) throw new Error('2captcha submit: ' + sub.data.request);
+  const id = sub.data.request;
+  await sleep(15000);
+  for (let i = 0; i < 40; i++) {
+    const r = await axios.get('https://2captcha.com/res.php', { params: { key, action: 'get', id, json: 1 }, timeout: 30000 });
+    if (r.data.status === 1) return r.data.request;
+    if (r.data.request !== 'CAPCHA_NOT_READY') throw new Error('2captcha: ' + r.data.request);
+    await sleep(5000);
+  }
+  throw new Error('2captcha timeout');
+}
+function isChallengePage(txt, title) { return /just a moment|performing security verification|checking your browser|verify you are human|attention required/i.test((txt || '') + ' ' + (title || '')); }
+// clear a Cloudflare interstitial if present; returns true when the page is through
+async function passCloudflare(page) {
+  const challenged = await page.evaluate(() => { const t = (document.body && document.body.innerText) || ''; return /just a moment|performing security verification|checking your browser|verify you are human|attention required/i.test(t + ' ' + (document.title || '')); }).catch(() => false);
+  if (!challenged) return true;
+  log('cloudflare challenge — capturing turnstile params');
+  let params = null;
+  for (let i = 0; i < 45; i++) { params = await page.evaluate(() => window.__cf).catch(() => null); if (params && params.sitekey) break; await sleep(1000); }
+  if (!params || !params.sitekey) { await shot(page, 'cf-noparams'); throw new Error('cloudflare: could not capture turnstile params'); }
+  log('solving cloudflare turnstile…', params.sitekey.slice(0, 10));
+  const token = await solveTurnstileParams(params, page.url());
+  await page.evaluate((tok) => { try { if (typeof window.__cfCb === 'function') window.__cfCb(tok); } catch (e) {} }, token);
+  for (let i = 0; i < 30; i++) { await sleep(1000); const still = await page.evaluate(() => { const t = (document.body && document.body.innerText) || ''; return /just a moment|performing security verification/i.test(t + ' ' + (document.title || '')); }).catch(() => false); if (!still) { log('cloudflare cleared'); return true; } }
+  await shot(page, 'cf-stuck'); throw new Error('cloudflare challenge did not clear after solve');
+}
+// navigate to a panel URL and clear any Cloudflare interstitial
+async function gotoPanel(page, url, waitMs) { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {}); await sleep(waitMs || 2500); await passCloudflare(page); }
 async function shot(page, name) { try { const f = path.join(SHOTS, name + '-' + Date.now() + '.png'); await page.screenshot({ path: f }); return f; } catch (e) { return null; } }
 
 // click the first visible element whose text matches one of `texts`
@@ -219,8 +267,10 @@ async function doLogin(page) {
   const acct = await getAccount();
   if (!acct.panel_user || !acct.panel_pass) throw new Error('panel credentials not set — POST /config {panel_user,panel_pass} first');
   await page.goto(BASE + '/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await sleep(3500);
-  if (await isLoggedIn(page)) return true;   // cookie still good, server bounced us to dashboard
+  await sleep(3000);
+  await passCloudflare(page);   // clear the "Just a moment" interstitial; cf_clearance persists in the profile
+  await sleep(2000);
+  if (await isLoggedIn(page)) { const s = await saveStorage(page); await setAccount({ state: 'active', storage: s, heartbeat: true }); return true; }
   // diagnostics — capture exactly what the login page looks like through the proxy
   const diag = await page.evaluate(() => {
     const inputs = [...document.querySelectorAll('input')].map(i => ({ type: i.type, name: i.name || '', ph: i.placeholder || '' }));
@@ -262,6 +312,7 @@ async function doLogin(page) {
   }
   // wait for dashboard
   await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+  await passCloudflare(page).catch(() => {});   // a post-login CF check can appear
   const ok = await isLoggedIn(page);
   if (!ok) {
     await shot(page, 'login-fail');
@@ -282,7 +333,8 @@ async function ensureLogin(page) {
   if (typeof storage === 'string') { try { storage = JSON.parse(storage); } catch (e) { storage = null; } }
   if (storage) { try { await restoreStorage(page, storage); } catch (e) {} }
   await page.goto(BASE + '/devices/m3u', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-  if (await isLoggedIn(page)) { await setAccount({ state: 'active', heartbeat: true }); return true; }
+  await passCloudflare(page).catch(() => {});   // clear interstitial if the cached clearance held but CF rechecked
+  if (await isLoggedIn(page)) { const s = await saveStorage(page); await setAccount({ state: 'active', storage: s, heartbeat: true }); return true; }
   await setAccount({ state: 'needs_relogin' });
   return await doLogin(page);
 }
@@ -351,8 +403,7 @@ async function createLine(opts) {
   try {
     const page = await newPage(browser);
     await ensureLogin(page);
-    await page.goto(BASE + '/devices/m3u/create', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await sleep(2500);
+    await gotoPanel(page, BASE + '/devices/m3u/create', 2500);
     // username — the panel pre-fills a generated one. Keep it unless the caller supplied a username.
     // (Field is a typeless <input>, so match by IDL type, not the CSS [type=text] selector.)
     let username = (opts.username || '').trim();
@@ -379,8 +430,7 @@ async function createLine(opts) {
     await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
     await sleep(2500);
     // read the created line back from the list
-    await page.goto(BASE + '/devices/m3u', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-    await sleep(2000);
+    await gotoPanel(page, BASE + '/devices/m3u', 2000);
     const row = await readLineRow(page, username) || await readLineRow(page, null);
     if (!row || !row.username) { await shot(page, 'create-norow'); throw new Error('created, but could not read the new line — check the panel'); }
     const credits = await readCredits(page);
@@ -405,8 +455,7 @@ async function renewLine(opts) {
   try {
     const page = await newPage(browser);
     await ensureLogin(page);
-    await page.goto(BASE + '/devices/m3u', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await sleep(2000);
+    await gotoPanel(page, BASE + '/devices/m3u', 2000);
     // search to surface the row
     await page.evaluate((u) => {
       const s = document.querySelector('input[placeholder*="Search" i], input[type=search]');
@@ -435,8 +484,7 @@ async function renewLine(opts) {
     if (!await clickByText(page, ['save'], 'button, input[type=submit]')) { await shot(page, 'renew-nosave'); throw new Error('could not find Save in renew modal'); }
     await sleep(3000);
     // re-read expiry
-    await page.goto(BASE + '/devices/m3u', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
-    await sleep(2000);
+    await gotoPanel(page, BASE + '/devices/m3u', 2000);
     const after = await readLineRow(page, username);
     const credits = await readCredits(page);
     await setAccount({ credits, heartbeat: true });
@@ -456,8 +504,7 @@ async function searchLine(username) {
   try {
     const page = await newPage(browser);
     await ensureLogin(page);
-    await page.goto(BASE + '/devices/m3u', { waitUntil: 'domcontentloaded', timeout: 60000 });
-    await sleep(2000);
+    await gotoPanel(page, BASE + '/devices/m3u', 2000);
     await page.evaluate((u) => {
       const s = document.querySelector('input[placeholder*="Search" i], input[type=search]');
       if (s) { const d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set; d.call(s, u); s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true })); }
@@ -503,6 +550,7 @@ async function sessionImport(body) {
     const page = await newPage(browser);
     await restoreStorage(page, storage);
     await page.goto(BASE + '/devices/m3u', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await passCloudflare(page).catch(() => {});
     if (!await isLoggedIn(page)) { await shot(page, 'import-notloggedin'); return { ok: false, state: 'error', message: 'Imported session is NOT logged in. Re-export bqpanel.com cookies while logged in.' }; }
     const fresh = await saveStorage(page);
     const credits = await readCredits(page);
@@ -537,6 +585,7 @@ async function keepAlive() {
     let storage = acct.storage_state; if (typeof storage === 'string') { try { storage = JSON.parse(storage); } catch (e) {} }
     if (storage) await restoreStorage(page, storage).catch(() => {});
     await page.goto(BASE + '/devices/m3u', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await passCloudflare(page).catch(() => {});
     if (await isLoggedIn(page)) {
       const fresh = await saveStorage(page); const credits = await readCredits(page);
       await setAccount({ state: 'active', storage: fresh, credits, heartbeat: true });
