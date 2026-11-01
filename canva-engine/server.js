@@ -128,10 +128,11 @@ async function clickByText(page, texts, opts) {
   return true;
 }
 
-// hydration-aware logged-in check (SPA settles after domcontentloaded)
+// hydration-aware logged-in check (SPA settles after domcontentloaded).
+// 40s because Canva loads slowly through a residential proxy.
 async function isLoggedIn(page) {
   try {
-    const deadline = Date.now() + 14000;
+    const deadline = Date.now() + 40000;
     while (Date.now() < deadline) {
       const u = page.url();
       if (/\/(login|signup)(\/|\?|$)/i.test(u)) return false;
