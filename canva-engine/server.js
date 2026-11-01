@@ -176,14 +176,14 @@ async function proxyResetUsage() { await db.query('UPDATE canva_account SET prox
 
 // ─── puppeteer helpers ───
 async function launch() { await loadProxy(); const args = PROXY_CFG ? ARGS.concat('--proxy-server=' + PROXY_CFG.server) : ARGS; return puppeteer.launch({ headless: false, userDataDir: PROFILE, args, defaultViewport: null, ignoreDefaultArgs: ['--enable-automation'] }); }
-async function newPage(browser) {
+async function newPage(browser, opts) {
   const pages = await browser.pages();
   const page = pages.length ? pages[0] : await browser.newPage();
   // puppeteer-extra-plugin-stealth (when loaded) applies comprehensive fingerprint evasions automatically.
   if (PROXY_CFG && (PROXY_CFG.username || PROXY_CFG.password)) { try { await page.authenticate({ username: PROXY_CFG.username, password: PROXY_CFG.password }); } catch (e) { log('proxy auth warn', e.message); } }
   await page.setUserAgent(UA);
   await page.setViewport({ width: 1366, height: 900 });
-  await blockHeavy(page);
+  if (!(opts && opts.noBlock)) await blockHeavy(page);   // the People-management SPA needs its assets to render; don't block for removal
   // count real bytes-over-the-wire through the proxy (compressed transfer size)
   try { const cdp = await page.target().createCDPSession(); await cdp.send('Network.enable'); cdp.on('Network.loadingFinished', e => { PENDING_BYTES += (e.encodedDataLength || 0); }); } catch (e) { log('cdp bytes warn', e.message); }
   return page;
@@ -666,7 +666,7 @@ async function removeMember(email) {
   const browser = await launch();
   const netLog = []; let batchBody = null;
   try {
-    const page = await newPage(browser);
+    const page = await newPage(browser, { noBlock: true });
     page.on('request', req => { try { const m = req.method(); const u = req.url(); if (m !== 'GET' && /\/_ajax\//.test(u) && /member|brand|remove|delete|revoke|membership|group|batch/i.test(u)) { const b = req.postData() || ''; if (/memberships\/batch/i.test(u)) batchBody = b.slice(0, 900); log('REMOVE-REQ ' + m + ' ' + u.replace('https://www.canva.com', '').split('?')[0] + ' BODY=' + b.slice(0, 500)); } } catch (e) {} });
     page.on('response', async (res) => { try { const m = res.request().method(); const u = res.url(); if (m !== 'GET' && /\/_ajax\//.test(u) && /member|brand|remove|delete|revoke|membership|group/i.test(u)) netLog.push(m + ' ' + res.status() + ' ' + u.replace('https://www.canva.com', '').split('?')[0]); } catch (e) {} });
     await restoreStorage(page, acct.storage_state);
@@ -675,27 +675,23 @@ async function removeMember(email) {
     // confirm the member exists first (API)
     const existsBefore = await page.evaluate(async (email) => { try { const r = await fetch('/_ajax/profilesearch/search_brand_members?searchEmail=' + encodeURIComponent(email) + '&projection=B&projection=C&projection=D&limit=10', { credentials: 'include' }); let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); const j = JSON.parse(t); return (j.results || []).some(m => m.C && String(m.C.email || '').toLowerCase() === email); } catch (e) { return null; } }, email);
     if (existsBefore === false) return { ok: false, result: 'not_found', message: 'Member not in team: ' + email };
-    // WAIT until the People UI actually renders (search box present) — slow through the proxy
+    // WAIT until the member rows actually render (real <input type=checkbox> present) — assets now load (noBlock)
     let rendered = false;
-    for (let i = 0; i < 30 && !rendered; i++) { await sleep(1000); rendered = await page.evaluate(() => [...document.querySelectorAll('input')].some(x => /search/i.test((x.getAttribute('placeholder') || '') + (x.getAttribute('aria-label') || ''))) ).catch(() => false); }
-    log('remove: people UI rendered=' + rendered);
-    if (!rendered) { const d = await page.evaluate(() => ({ url: location.href, title: document.title, inputs: document.querySelectorAll('input').length, btns: document.querySelectorAll('button').length, spinner: !!document.querySelector('[class*=loading i],[class*=spinner i],[aria-busy="true"]'), snippet: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 220) })).catch(e => ({ err: e.message })); log('remove: render-fail diag ' + JSON.stringify(d)); }
-    // type email into the People search box to filter to just this member
-    const typed = await page.evaluate(() => { const i = [...document.querySelectorAll('input')].find(x => { const ph = ((x.getAttribute('placeholder') || '') + ' ' + (x.getAttribute('aria-label') || '')).toLowerCase(); return /search/.test(ph) && /member|name|email/.test(ph); }); if (i) { i.focus(); return true; } return false; });
-    if (typed) { await page.keyboard.type(email, { delay: 45 }); await sleep(4500); }
-    // locate the member's row by its email cell, then click its checkbox (left edge) with a real mouse click
+    for (let i = 0; i < 45 && !rendered; i++) { await sleep(1000); rendered = await page.evaluate(() => [...document.querySelectorAll('table tbody tr')].some(tr => tr.querySelector('input[type=checkbox]'))).catch(() => false); }
+    log('remove: members table rendered=' + rendered);
+    if (!rendered) { const d = await page.evaluate(() => ({ url: location.href, title: document.title, inputs: document.querySelectorAll('input').length, rows: document.querySelectorAll('table tbody tr').length, spinner: !!document.querySelector('[class*=loading i],[class*=spinner i],[aria-busy="true"]'), snippet: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 220) })).catch(e => ({ err: e.message })); log('remove: render-fail diag ' + JSON.stringify(d)); return { ok: false, removed: false, email, message: 'People list did not render', net: netLog.slice(-8) }; }
+    // locate the member's row by email and real-click its checkbox (robust — no pixel/XPath guessing)
     const target = await page.evaluate((email) => {
-      let cell = null;
-      try { const snap = document.evaluate("//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'" + email + "')]", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); cell = snap.singleNodeValue; } catch (e) {}
-      if (!cell) return null;
-      let row = cell;
-      for (let k = 0; k < 8; k++) { const r = row.getBoundingClientRect(); if (r.width > 500) break; if (!row.parentElement) break; row = row.parentElement; }
-      const r = row.getBoundingClientRect();
-      return { cx: Math.round(r.left + 22), cy: Math.round((r.top + r.bottom) / 2), rowW: Math.round(r.width) };
+      const tr = [...document.querySelectorAll('table tbody tr')].find(r => (r.innerText || '').toLowerCase().includes(email));
+      if (!tr) return null;
+      const cb = tr.querySelector('input[type=checkbox]'); if (!cb) return null;
+      const r = cb.getBoundingClientRect();
+      return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) };
     }, email);
     const selected = !!target;
-    if (target) { await page.mouse.click(target.cx, target.cy); }
-    await sleep(2500);
+    if (!target) { await shot(page, 'remove-norow'); return { ok: false, removed: false, email, message: 'member row not found in the rendered list' }; }
+    await page.mouse.click(target.cx, target.cy);
+    await sleep(2200);
     // dump + click the trash in the floating bulk-action bar (exclude left sidebar; trash is before the close X)
     const del = await page.evaluate(() => {
       const btns = [...document.querySelectorAll('button,[role=button]')].filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top > (window.innerHeight - 190) && r.left > 300; });
@@ -711,7 +707,7 @@ async function removeMember(email) {
     const existsAfter = await page.evaluate(async (email) => { try { const r = await fetch('/_ajax/profilesearch/search_brand_members?searchEmail=' + encodeURIComponent(email) + '&projection=B&projection=C&projection=D&limit=10', { credentials: 'include' }); let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); const j = JSON.parse(t); return (j.results || []).some(m => m.C && String(m.C.email || '').toLowerCase() === email); } catch (e) { return null; } }, email);
     if (existsAfter === false) { log('member removed: ' + email); return { ok: true, removed: true, email, removeApi: netLog.slice(-10), batchBody }; }
     await shot(page, 'remove-failed');
-    return { ok: false, removed: false, email, message: 'Remove did not take effect', debug: { typed, selected, del }, net: netLog.slice(-12), batchBody };
+    return { ok: false, removed: false, email, message: 'Remove did not take effect', debug: { selected, del }, net: netLog.slice(-12), batchBody };
   } catch (e) { log('removeMember error', e.message); return { ok: false, message: e.message, net: netLog }; }
   finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
