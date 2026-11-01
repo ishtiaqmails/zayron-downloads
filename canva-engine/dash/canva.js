@@ -30,7 +30,10 @@ function cvSwitchAccount(btn){
 
 function cvTickExp(){ var el=document.getElementById('cv-exp'); if(!CV.exp){el.textContent='';return;}
   var ms=new Date(CV.exp).getTime()-Date.now();
-  if(ms<=0){el.innerHTML='<span style="color:#dc2626;font-weight:700;">Expired — press “Refresh code now”.</span>';return;}
+  if(ms<=90000){ // within ~90s of Canva's rotation (or past it) — auto-pull the current code so the page is never stale
+    if(!CV.autofetch){ CV.autofetch=true; el.innerHTML='Updating to the latest code…'; cvLoadCode(false); setTimeout(function(){CV.autofetch=false;},60000); }
+    if(ms<=0) return;
+  }
   var h=Math.floor(ms/3600000),m=Math.floor((ms%3600000)/60000);
   el.innerHTML='Valid until <b>'+new Date(CV.exp).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})+'</b> · about '+(h>0?h+'h ':'')+m+'m left';
 }
