@@ -86,9 +86,10 @@ async function sendCodeTo(sock, jid, email, fresh) {
 function multiMsg(rows, c) {
   let exp = 'rotates about every 4 hours';
   if (c && c.expiresAt) { const d = new Date(c.expiresAt); exp = d.toLocaleString('en-US', { timeZone: 'Asia/Karachi', hour: 'numeric', minute: '2-digit', hour12: true }) + ' · ' + d.toLocaleString('en-GB', { timeZone: 'Asia/Karachi', day: '2-digit', month: '2-digit', year: 'numeric' }); }
-  const list = rows.map((r, i) => (i + 1) + '. ' + r.email + ' — ' + (r.joined_at ? '✅ joined' : '⏳ not joined yet')).join('\n');
-  return [
-    '🎨 *Canva Education — your codes*',
+  const total = rows.length, joined = rows.filter(r => r.joined_at).length;
+  const waiting = rows.filter(r => !r.joined_at);
+  const L = [
+    '🎨 *Canva Education*',
     '───────────',
     '',
     '🔑 *Join code* (same for everyone)',
@@ -96,12 +97,18 @@ function multiMsg(rows, c) {
     '🔗 ' + ((c && c.joinLink) || 'https://www.canva.com/class/join'),
     '⏳ Valid till: ' + exp,
     '',
-    '👥 *Your customers*',
-    list,
-    '',
-    'Each customer opens the link and joins with THEIR OWN email above — it must match.',
-    '🔄 Reply *canva* anytime for the latest code.'
-  ].join('\n');
+    '👥 ' + total + ' customers · ✅ ' + joined + ' joined · ⏳ ' + waiting.length + ' waiting'
+  ];
+  if (waiting.length) {
+    L.push('', '*Still to join:*');
+    L.push(waiting.slice(0, 15).map(r => '• ' + r.email).join('\n'));
+    if (waiting.length > 15) L.push('…and ' + (waiting.length - 15) + ' more');
+    L.push('', 'Each opens the link and joins with their own email — it must match.');
+  } else {
+    L.push('', '✅ All your customers have joined. Reply *canva* anytime for the code to add more.');
+  }
+  L.push('', '🔄 Reply *canva* for the latest code.');
+  return L.join('\n');
 }
 
 // called from inviteVendorService.notifyVendorForOrder when the order is a Canva engine order
