@@ -112,7 +112,11 @@ async function maybeResendForText(sock, jid, phone, textLower) {
   const ph = normPhone(phone), suf = ph.slice(-10);
   // tolerant match: exact phone OR last-10-digits (handles country-code / LID differences)
   const r = await db.query("SELECT email, joined_at, expires_at FROM canva_allowlist WHERE (customer_phone=$1 OR right(customer_phone,10)=$2) AND (expires_at IS NULL OR expires_at>NOW()) ORDER BY added_at DESC LIMIT 1", [ph, suf]);
-  if (!r.rows.length) return false;
+  if (!r.rows.length) {
+    // owner shortcut: let the owner pull the current code by texting "canva" (for testing / manual use)
+    try { const ownerPhone = normPhone(require('../../config').owner.phone); if (ownerPhone && suf === ownerPhone.slice(-10)) { const c = await engine('GET', '/code'); if (c.ok) await sock.sendMessage(jid, { text: '🎨 *Canva join code*\n\n*' + (c.code || '') + '*\n' + (c.joinLink || 'https://www.canva.com/class/join') + '\n\n(Owner lookup — code rotates ~every 4h.)' }); return true; } } catch (e) {}
+    return false;
+  }
   const row = r.rows[0];
   if (row.joined_at) await sock.sendMessage(jid, { text: joinedMsg(row.email, row.expires_at) });
   else await sendCodeTo(sock, jid, row.email, true);

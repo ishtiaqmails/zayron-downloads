@@ -565,7 +565,7 @@ async function fetchCode(regen) {
           for (const e of els) { const t = (((e.getAttribute('aria-label') || '') + ' ' + (e.getAttribute('title') || '') + ' ' + (e.innerText || '')).toLowerCase()); if (/refresh|reset|regenerat|new code/.test(t)) { const b = (e.closest('button,[role=button]') || e).getBoundingClientRect(); if (b.width > 0 && b.height > 0) return { x: Math.round(b.left + b.width / 2), y: Math.round(b.top + b.height / 2) }; } }
           return null;
         });
-        if (box) { await page.mouse.click(box.x, box.y); log('code: clicked Refresh (trusted)'); await sleep(3200); try { await clickByText(page, ['refresh', 'reset', 'generate', 'confirm', 'yes']); } catch (e) {} await sleep(1500); }
+        if (box) { await page.mouse.click(box.x, box.y); log('code: clicked Refresh (trusted)'); await sleep(3000); }
         else log('code: no refresh control found');
       } catch (e) {}
     }
@@ -583,7 +583,7 @@ const CODE_TTL_MS = 4 * 3600 * 1000;
 async function getCode(forceFresh) {
   const a = await getAccount();
   const ageMs = a.code_at ? (Date.now() - new Date(a.code_at).getTime()) : Infinity;
-  if (forceFresh || !a.code || ageMs >= 3.5 * 3600 * 1000) { const f = await fetchCode(forceFresh); if (!f.ok) return f; }
+  if (forceFresh || !a.code || ageMs >= 3.5 * 3600 * 1000) { const f = await fetchCode(forceFresh); if (!f.ok && !a.code) return f; }
   const a2 = await getAccount();
   const codeAt = a2.code_at ? new Date(a2.code_at).getTime() : Date.now();
   const expiresAt = codeAt + CODE_TTL_MS;
