@@ -87,7 +87,6 @@ async function newPage(browser) {
       Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
       window.chrome = window.chrome || { runtime: {} };
       try { const q = window.navigator.permissions && window.navigator.permissions.query; if (q) window.navigator.permissions.query = (p) => (p && p.name === 'notifications') ? Promise.resolve({ state: Notification.permission }) : q(p); } catch (e) {}
-      try { const gp = WebGLRenderingContext.prototype.getParameter; WebGLRenderingContext.prototype.getParameter = function (p) { if (p === 37445) return 'Intel Inc.'; if (p === 37446) return 'Intel Iris OpenGL Engine'; return gp.call(this, p); }; } catch (e) {}
     });
   } catch (e) { log('stealth warn', e.message); }
   if (PROXY_CFG && (PROXY_CFG.username || PROXY_CFG.password)) { try { await page.authenticate({ username: PROXY_CFG.username, password: PROXY_CFG.password }); } catch (e) { log('proxy auth warn', e.message); } }
@@ -345,8 +344,8 @@ async function invite(customerEmail) {
     await restoreStorage(page, acct.storage_state);
     if (!await isLoggedIn(page)) { await shot(page, 'invite-loggedout'); await setState('needs_relogin'); return { ok: false, result: 'needs_relogin', message: 'Session expired — re-import needed' }; }
     try { if (await alreadyInvited(page, brand, target)) { log('already invited', target); return { ok: true, result: 'already_invited', message: 'Already invited: ' + customerEmail }; } } catch (e) {}
-    let createOk = false, createBody = null, createSeen = false, assessInfo = null;
-    onResp = async (res) => { try { const u = res.url(); if (/invitations\/create/.test(u)) { createSeen = true; const t = await res.text(); createBody = t; if (res.status() >= 200 && res.status() < 300 && t && t.toLowerCase().includes(target)) createOk = true; } else if (/requestriskscoring\/assess/.test(u)) { const t = await res.text().catch(() => ''); assessInfo = { status: res.status(), body: String(t || '').slice(0, 300) }; } } catch (e) {} };
+    let createOk = false, createBody = null, createSeen = false, assessInfo = null; const netLog = [];
+    onResp = async (res) => { try { const u = res.url(); if (/_ajax|recaptcha|risk|assess|invitation/i.test(u)) netLog.push(res.status() + ' ' + res.request().method() + ' ' + u.replace('https://www.canva.com', '').split('?')[0]); if (/invitations\/create/.test(u)) { createSeen = true; const t = await res.text(); createBody = t; if (res.status() >= 200 && res.status() < 300 && t && t.toLowerCase().includes(target)) createOk = true; } else if (/requestriskscoring\/assess/.test(u)) { const t = await res.text().catch(() => ''); assessInfo = { status: res.status(), body: String(t || '').slice(0, 200) }; } } catch (e) {} };
     page.on('response', onResp);
     if (!await openInviteDialog(page)) { await shot(page, 'invite-nodialog'); const dbg = await page.evaluate(() => ({ url: location.href, title: document.title, buttons: [...new Set([...document.querySelectorAll('button,[role=button]')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).map(e => (e.innerText || '').replace(/\s+/g, ' ').trim()).filter(t => t && t.length < 40))].slice(0, 30) })).catch(() => null); return { ok: false, result: 'error', message: 'Could not open the invite dialog (button or email field not found)', detail: dbg }; }
     if (!await typeEmail(page, customerEmail.trim())) { await shot(page, 'invite-nofield'); return { ok: false, result: 'error', message: 'Email field not found' }; }
@@ -360,7 +359,7 @@ async function invite(customerEmail) {
     }
     if (createOk || live) { log('invite sent', target, createOk ? '(create 200)' : '(aria-live)'); return { ok: true, result: 'sent', message: 'Invitation sent to ' + customerEmail }; }
     await shot(page, 'invite-nosignal');
-    if (!createSeen) return { ok: false, result: 'blocked', message: 'No create request fired — Canva risk gate (assess) did not clear.', detail: { assess: assessInfo, egress: PROXY_CFG ? PROXY_CFG.server : 'direct' } };
+    if (!createSeen) return { ok: false, result: 'blocked', message: 'No create request fired — Canva risk gate (assess) did not clear.', detail: { assess: assessInfo, net: netLog.slice(-18), egress: PROXY_CFG ? PROXY_CFG.server : 'direct' } };
     return { ok: false, result: 'error', message: 'create fired but no success echo', detail: createBody ? String(createBody).slice(0, 200) : null };
   } catch (e) { log('invite error', e.message); return { ok: false, result: 'error', message: e.message }; }
   finally { try { if (onResp) page.off && page.off('response', onResp); } catch (e) {} try { await browser.close(); } catch (e) {} unlock(); }
