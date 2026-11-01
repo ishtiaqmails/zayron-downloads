@@ -85,6 +85,8 @@ async function initDb() {
     done_at timestamptz
   )`);
   await db.query(`CREATE TABLE IF NOT EXISTS canva_members (email text PRIMARY KEY, seen_at timestamptz NOT NULL DEFAULT NOW())`);  // snapshot of who is in the team right now
+  await db.query(`ALTER TABLE canva_members ADD COLUMN IF NOT EXISTS name text`);
+  await db.query(`ALTER TABLE canva_members ADD COLUMN IF NOT EXISTS role text`);
   await db.query(`CREATE TABLE IF NOT EXISTS canva_remove_queue (
     email text PRIMARY KEY,
     status text NOT NULL DEFAULT 'queued',       -- queued|working|done|failed
@@ -114,9 +116,13 @@ const TERM_DAYS = 365;  // paid Canva order = 1 year of access
 async function listAllow() { const r = await db.query('SELECT email, source, order_ref, note, added_at, expires_at, joined_at, customer_phone FROM canva_allowlist ORDER BY added_at DESC'); return r.rows; }
 // confirm joins: any allowlisted email that now appears in the team gets joined_at stamped (called on every members read — no extra bandwidth)
 async function markJoins(members) { try { const emails = (members || []).map(m => normEmail(m.email)).filter(Boolean); if (!emails.length) return;
-  try { await db.query("INSERT INTO canva_members(email,seen_at) SELECT unnest($1::text[]), NOW() ON CONFLICT(email) DO UPDATE SET seen_at=NOW()", [emails]); await db.query("DELETE FROM canva_members WHERE email <> ALL($1::text[])", [emails]); } catch (e) {}
+  try { for (const m of members) { const e = normEmail(m.email); if (!e) continue; await db.query("INSERT INTO canva_members(email,name,role,seen_at) VALUES($1,$2,$3,NOW()) ON CONFLICT(email) DO UPDATE SET name=EXCLUDED.name, role=EXCLUDED.role, seen_at=NOW()", [e, m.name || null, m.role || null]); } await db.query("DELETE FROM canva_members WHERE email <> ALL($1::text[])", [emails]); } catch (e) {}
   const r = await db.query('UPDATE canva_allowlist SET joined_at=NOW() WHERE joined_at IS NULL AND email = ANY($1::text[]) RETURNING email, customer_phone, source', [emails]); for (const row of r.rows) { if (row.source === 'order' && row.customer_phone) { try { await db.query("INSERT INTO canva_outbox(kind,email,phone,status) VALUES('joined',$1,$2,'queued')", [row.email, row.customer_phone]); } catch (e) {} } } } catch (e) { log('markJoins', e.message); } }
 async function pendingJoinCount() { try { const r = await db.query("SELECT COUNT(*)::int n FROM canva_allowlist WHERE joined_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())"); return r.rows[0].n; } catch (e) { return 0; } }
+// last-known team snapshot (instant, no browser) — for showing the team on the dashboard immediately
+async function membersLast() { try { const r = await db.query("SELECT email, name, role FROM canva_members ORDER BY (role='OWNER') DESC, email"); return { ok: true, count: r.rows.length, members: r.rows, cached: true }; } catch (e) { return { ok: false, message: e.message }; } }
+// protect everyone currently on the account (pre-automation members) — add them to the allowlist permanently so they're never flagged
+async function protectExisting() { const mem = await fetchMembers(); if (!mem.ok) return mem; let n = 0; for (const m of mem.members) { if (m.role === 'MEMBER' && m.email) { try { await addAllow(m.email, 'existing', null, 'existing member (pre-automation)', null); n++; } catch (e) {} } } return { ok: true, protected: n, total: mem.count }; }
 // expiresAt: explicit ISO/Date, or undefined => auto (orders get now+TERM_DAYS, manual stays permanent/NULL)
 async function addAllow(email, source, orderRef, note, expiresAt, customerPhone) { email = normEmail(email); if (!email || !email.includes('@')) return false; source = source || 'manual'; let exp = (expiresAt === undefined) ? (source === 'order' ? new Date(Date.now() + TERM_DAYS * 86400000) : null) : (expiresAt ? new Date(expiresAt) : null); const ph = customerPhone ? String(customerPhone).replace(/[^0-9]/g, '') : null; await db.query('INSERT INTO canva_allowlist(email,source,order_ref,note,expires_at,customer_phone) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(email) DO UPDATE SET source=EXCLUDED.source, order_ref=COALESCE(EXCLUDED.order_ref,canva_allowlist.order_ref), note=COALESCE(EXCLUDED.note,canva_allowlist.note), expires_at=EXCLUDED.expires_at, customer_phone=COALESCE(EXCLUDED.customer_phone,canva_allowlist.customer_phone)', [email, source, orderRef || null, note || null, exp, ph]); return true; }
 // bot-delivery config lives in bot_settings (same DB); the dashboard toggles it, the bot reads it
@@ -317,6 +323,7 @@ async function sessionImport(body) {
     if (detectedBrand) extra.brand = detectedBrand;
     extra.code = null; // new account => clear cached code so it refetches
     await setState('active', extra);
+    try { await db.query('DELETE FROM canva_members'); await db.query('UPDATE canva_account SET code_expires_at=NULL WHERE id=1'); } catch (e) {}  // new account has its own team — drop the old snapshot/expiry
     log('session imported + verified + profile warmed (cookies:' + norm.length + ', brand=' + (detectedBrand || '(kept)') + ')');
     return { ok: true, state: 'active', message: 'Session imported and verified — Canva is logged in.', brand: detectedBrand || null };
   } catch (e) { return { ok: false, state: 'error', message: e.message }; }
@@ -897,6 +904,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && path === '/reverify') { try { return send(res, 200, await reverify()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && (path === '/code' || path === '/code/refresh')) { try { return send(res, 200, await getCode(path.endsWith('refresh'))); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && path === '/members') { try { return send(res, 200, await fetchMembers()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && path === '/members/last') { try { return send(res, 200, await membersLast()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'POST' && path === '/allow/protect-existing') { try { return send(res, 200, await protectExisting()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && path === '/reconcile') { try { return send(res, 200, await reconcile()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && path === '/allow') { try { return send(res, 200, { ok: true, allow: await listAllow() }); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/allow') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); const okk = await addAllow(b.email, b.source || 'manual', b.order_ref || null, b.note || null, undefined, b.customer_phone || null); let prejoined = false; if (okk && (b.source === 'order')) { try { const pj = await db.query("UPDATE canva_allowlist SET joined_at=NOW() WHERE email=$1 AND joined_at IS NULL AND EXISTS(SELECT 1 FROM canva_members WHERE email=$1) RETURNING 1", [normEmail(b.email)]); prejoined = pj.rows.length > 0; } catch (e) {} } return send(res, 200, { ok: okk, email: normEmail(b.email), prejoined }); }

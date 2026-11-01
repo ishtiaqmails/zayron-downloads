@@ -188,5 +188,9 @@ function cvLoadMode(){ cvGet('/botcfg').then(function(r){ if(!r.ok||!r.cfg)retur
 function cvToggleAuto(el){ cvPost('/botcfg',{canva_enabled:el.checked, canva_delivery_mode:(el.checked?'engine':'vendor')}).then(function(){ cvToast(el.checked?'Automatic delivery ON':'Switched to old vendor'); cvLoadMode(); }); }
 function cvResend(email){ cvPost('/resend',{email:email}).then(function(r){ cvToast(r.ok?'Queued — the bot will send it shortly':(r.message||'Could not resend')); }); }
 
-cvLoadStatus(); cvLoadCode(false); cvLoadAllow(); cvLoadProxy(); cvLoadMode();
+// show the last-saved team instantly on open (no live browser op); Scan refreshes it live
+function cvScanCached(){ Promise.all([cvGet('/members/last'), cvGet('/allow')]).then(function(res){ var mem=res[0], al=res[1]; if(al&&al.allow)CV.allow=al.allow; if(mem&&mem.ok&&(mem.members||[]).length){ CV.members=mem.members; cvComputeUnknown(); document.getElementById('cv-s-members').textContent=CV.members.length; document.getElementById('cv-scan-meta').innerHTML='Last saved team: <b>'+CV.members.length+'</b> · not on list: <b>'+CV.unknown.length+'</b>. Press “Scan team now” to refresh live.'; CV.scanPage=1; cvRenderScan(); } else { document.getElementById('cv-scan-meta').textContent='Press “Scan team now” to read your team live from Canva.'; } }); }
+function cvProtectExisting(){ if(!confirm('Add ALL current team members to your authorised list so they are never removed?\n(Use this once for members who existed before automation.)'))return; cvToast('Protecting current members… (~20s)'); cvPost('/allow/protect-existing',{}).then(function(r){ if(r.ok){ cvToast('Protected '+r.protected+' members'); cvLoadAllow(); cvScan(); } else cvToast(r.message||'Could not protect'); }); }
+
+cvLoadStatus(); cvLoadCode(false); cvLoadAllow(); cvLoadProxy(); cvLoadMode(); cvScanCached();
 setInterval(cvTickExp, 30000); setInterval(cvLoadStatus, 60000); setInterval(cvLoadProxy, 60000);
