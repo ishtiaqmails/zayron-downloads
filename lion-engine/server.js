@@ -184,7 +184,17 @@ async function passCloudflare(page) {
   log('cloudflare challenge — capturing turnstile params');
   let params = null;
   for (let i = 0; i < 45; i++) { params = await page.evaluate(() => window.__cf).catch(() => null); if (params && params.sitekey) break; await sleep(1000); }
-  if (!params || !params.sitekey) { await shot(page, 'cf-noparams'); throw new Error('cloudflare: could not capture turnstile params'); }
+  if (!params || !params.sitekey) {
+    const cfd = await page.evaluate(() => {
+      const frames = [...document.querySelectorAll('iframe')].map(f => f.src || '').slice(0, 6);
+      const cfDivs = [...document.querySelectorAll('.cf-turnstile, [data-sitekey]')].map(d => ({ sk: d.getAttribute('data-sitekey'), action: d.getAttribute('data-action'), cls: (d.className || '').slice(0, 30) }));
+      return { hasTurnstileGlobal: typeof window.turnstile !== 'undefined', cfChlOpt: window._cf_chl_opt ? Object.keys(window._cf_chl_opt) : null, cRay: (window._cf_chl_opt && window._cf_chl_opt.cRay) || null, frames, cfDivs, title: document.title, snippet: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 180) };
+    }).catch(e => ({ err: e.message }));
+    await shot(page, 'cf-noparams');
+    const err = new Error('cloudflare: could not capture turnstile params');
+    err.diag = cfd;
+    throw err;
+  }
   log('solving cloudflare turnstile…', params.sitekey.slice(0, 10));
   const token = await solveTurnstileParams(params, page.url());
   await page.evaluate((tok) => { try { if (typeof window.__cfCb === 'function') window.__cfCb(tok); } catch (e) {} }, token);
