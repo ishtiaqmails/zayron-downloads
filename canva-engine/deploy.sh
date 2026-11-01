@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -e
 cd /opt/canva-engine
-EXPECT=884b7fa6b494983b84e371193072adc1269957f05273f3c292fbb1015f2d1df4
-URL=https://raw.githubusercontent.com/ishtiaqmails/zayron-downloads/d213ac29dd9a8831304fc09d4c266ca4c997cee0/canva-engine/server.js
+EXPECT=5b969c76212d547ca679f73d59d1ffc260cf72ae6a6f24230a79a1f377f9430f
+URL=https://raw.githubusercontent.com/ishtiaqmails/zayron-downloads/2d880114235a50b1e6f708a6db278c438a41f2f6/canva-engine/server.js
 curl -fsSL "$URL" -o server.new.js
 echo "$EXPECT  server.new.js" | sha256sum -c
 mv server.new.js server.js
