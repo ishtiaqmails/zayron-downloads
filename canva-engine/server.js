@@ -285,17 +285,26 @@ async function alreadyInvited(page, brand, target) {
   for (const e of arr) { if (e && typeof e === 'object') { for (const k in e) { const v = e[k]; if (typeof v === 'string' && v.toLowerCase() === target) return true; } } }
   return false;
 }
+// Trusted click (real mouse via CDP, isTrusted=true) on the smallest button matching rx.
+async function clickExactTrusted(page, rxSource, maxLen) {
+  const handle = await page.evaluateHandle((rxSource, maxLen) => {
+    const rx = new RegExp(rxSource, 'i');
+    const els = [...document.querySelectorAll('button,[role=button]')];
+    let exact = els.find(e => { const r = e.getBoundingClientRect(); const t = (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim(); return r.width > 0 && r.height > 0 && t.toLowerCase() === rxSource.replace(/[\^$]/g, '').toLowerCase(); });
+    let best = exact || els.find(e => { const r = e.getBoundingClientRect(); const t = (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim(); return r.width > 0 && r.height > 0 && rx.test(t) && t.length <= maxLen; });
+    return best || null;
+  }, rxSource, maxLen);
+  const el = handle.asElement();
+  if (!el) { await handle.dispose(); return false; }
+  try { await el.click({ delay: 40 }); } catch (e) { await el.dispose(); return false; }
+  await el.dispose();
+  return true;
+}
 async function openInviteDialog(page) {
   let clicked = false;
   for (let i = 0; i < 45 && !clicked; i++) {
-    clicked = await page.evaluate(() => {
-      const els = [...document.querySelectorAll('button,[role=button]')];
-      let best = els.find(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0 && /^invite students$/i.test((e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim()); });
-      if (!best) best = els.find(e => { const r = e.getBoundingClientRect(); const t = (e.innerText || '').replace(/\s+/g, ' ').trim(); return r.width > 0 && r.height > 0 && /invite students/i.test(t) && t.length < 40; });
-      if (best) { (best.closest('button,[role=button]') || best).click(); return true; }
-      return false;
-    });
-    if (!clicked) await sleep(1000);
+    if (await clickExactTrusted(page, 'invite students', 40)) { clicked = true; break; }
+    await sleep(1000);
   }
   if (!clicked) { // fallback path: avatar -> Teams -> team -> Invite people
     await clickByText(page, [''], { sel: '[aria-label*=Account i],[aria-label*=profile i],header img,nav img' }).catch(() => {});
@@ -315,16 +324,18 @@ async function waitInviteField(page, ms) {
   return false;
 }
 async function typeEmail(page, email) {
-  const ok = await page.evaluate(() => { const i = [...document.querySelectorAll('input')].find(x => /^Enter email for person/i.test(x.getAttribute('aria-label') || '') || /^Enter email address/i.test(x.placeholder || '')); if (i) { i.focus(); return true; } return false; });
-  if (!ok) return false;
-  await page.keyboard.type(email, { delay: 45 }); // real keystrokes so React registers + Send appears
+  const handle = await page.evaluateHandle(() => [...document.querySelectorAll('input')].find(x => /^Enter email for person/i.test(x.getAttribute('aria-label') || '') || /^Enter email address/i.test(x.placeholder || '')) || null);
+  const el = handle.asElement();
+  if (!el) { await handle.dispose(); return false; }
+  try { await el.click({ delay: 40 }); } catch (e) {}   // real click to focus (trusted gesture)
+  await el.dispose();
+  await page.keyboard.type(email, { delay: 70 }); // real keystrokes so React registers + Send appears
   return true;
 }
 async function clickSend(page, ms) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
-    const clicked = await page.evaluate(() => { const e = [...document.querySelectorAll('button,[role=button]')].find(x => { const r = x.getBoundingClientRect(); return r.width > 0 && /send invitations?/i.test((x.innerText || '').replace(/\s+/g, ' ').trim()); }); if (e) { e.click(); return true; } return false; });
-    if (clicked) return true;
+    if (await clickExactTrusted(page, 'send invitations', 30)) return true;
     await sleep(600);
   }
   return false;
