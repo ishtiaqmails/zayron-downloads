@@ -60,7 +60,10 @@ async function initDb() {
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS code_at timestamptz`);
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS code_expires_at timestamptz`);  // real rotation time read from Canva's dialog
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS admin_token text`);
+  await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS import_status text`);   // idle|importing|done|error — for async account switch
+  await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS import_message text`);
   await db.query(`INSERT INTO canva_account (id, state) VALUES (1, 'none') ON CONFLICT (id) DO NOTHING`);
+  await db.query(`UPDATE canva_account SET import_status='idle' WHERE id=1 AND import_status='importing'`);  // clear a stale in-progress flag left by a restart
   await db.query(`UPDATE canva_account SET admin_token=$1 WHERE id=1 AND (admin_token IS NULL OR admin_token='')`, [require('crypto').randomBytes(24).toString('hex')]);
   await db.query(`CREATE TABLE IF NOT EXISTS canva_allowlist (
     email text PRIMARY KEY,
@@ -175,7 +178,10 @@ async function proxySetQuota(mb) { mb = parseInt(mb, 10); if (!mb || mb < 1) ret
 async function proxyResetUsage() { await db.query('UPDATE canva_account SET proxy_bytes=0, proxy_since=NOW() WHERE id=1'); return { ok: true }; }
 
 // ─── puppeteer helpers ───
-async function launch() { await loadProxy(); const args = PROXY_CFG ? ARGS.concat('--proxy-server=' + PROXY_CFG.server) : ARGS; return puppeteer.launch({ headless: false, userDataDir: PROFILE, args, defaultViewport: null, ignoreDefaultArgs: ['--enable-automation'] }); }
+// a crashed browser can leave Chrome's Singleton lock behind, which wedges the NEXT launch forever.
+// We always launch under the single-browser lock(), so no live browser owns these — clear any stale ones first.
+function clearProfileLock() { for (const f of ['SingletonLock', 'SingletonSocket', 'SingletonCookie']) { try { fs.unlinkSync(path.join(PROFILE, f)); } catch (e) {} } }
+async function launch() { await loadProxy(); clearProfileLock(); const args = PROXY_CFG ? ARGS.concat('--proxy-server=' + PROXY_CFG.server) : ARGS; return puppeteer.launch({ headless: false, userDataDir: PROFILE, args, defaultViewport: null, ignoreDefaultArgs: ['--enable-automation'] }); }
 async function newPage(browser, opts) {
   const pages = await browser.pages();
   const page = pages.length ? pages[0] : await browser.newPage();
@@ -328,6 +334,26 @@ async function sessionImport(body) {
     return { ok: true, state: 'active', message: 'Session imported and verified — Canva is logged in.', brand: detectedBrand || null };
   } catch (e) { return { ok: false, state: 'error', message: e.message }; }
   finally { try { await browser.close(); } catch (e) {} unlock(); }
+}
+async function setImport(status, msg) { try { await db.query('UPDATE canva_account SET import_status=$1, import_message=$2 WHERE id=1', [status, msg || null]); } catch (e) {} }
+// Start an import in the BACKGROUND and return immediately. The import launches a browser and verifies
+// the session through the proxy (~60s) — far too long to hold an HTTP request open, since a front proxy
+// times out first and returns an HTML error page. The dashboard polls /status for the result instead.
+let IMPORT_RUNNING = false;
+async function sessionImportStart(body) {
+  let cookies = body.cookies;
+  if (typeof cookies === 'string') { try { cookies = JSON.parse(cookies); } catch (e) { return { ok: false, message: 'cookies field is not valid JSON' }; } }
+  if (cookies && Array.isArray(cookies.cookies)) cookies = cookies.cookies;
+  if (!Array.isArray(cookies) || !cookies.length) return { ok: false, message: 'no cookies provided' };
+  if (IMPORT_RUNNING) return { ok: false, message: 'an import is already running — wait for it to finish' };
+  IMPORT_RUNNING = true;
+  await setImport('importing', 'Verifying the new account… (about a minute)');
+  (async () => {
+    try { const r = await sessionImport(body); await setImport(r.ok ? 'done' : 'error', r.message || (r.ok ? 'Imported' : 'Import failed')); }
+    catch (e) { await setImport('error', e.message); }
+    finally { IMPORT_RUNNING = false; }
+  })();
+  return { ok: true, started: true, message: 'Switching account in the background — this takes about a minute.' };
 }
 async function sessionClear() { await setState('none', { email: null, storage: null }); return { ok: true, state: 'none' }; }
 
@@ -895,7 +921,7 @@ const server = http.createServer(async (req, res) => {
       return send(res, 401, { error: 'unauthorized' });
     }
     if (req.method === 'GET' && path === '/admin') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(ADMIN_HTML.replace('__TOKEN__', token || ADMIN)); }
-    if (req.method === 'GET' && path === '/status') { const a = await getAccount(); return send(res, 200, { email: a.email || null, state: a.state, brand: (a && a.brand) || DEFAULT_BRAND, proxy: (a && a.proxy) ? 'set' : (process.env.CANVA_PROXY ? 'env' : null), stealth: STEALTH, lastHeartbeat: a.last_heartbeat || null }); }
+    if (req.method === 'GET' && path === '/status') { const a = await getAccount(); return send(res, 200, { email: a.email || null, state: a.state, brand: (a && a.brand) || DEFAULT_BRAND, proxy: (a && a.proxy) ? 'set' : (process.env.CANVA_PROXY ? 'env' : null), stealth: STEALTH, importStatus: a.import_status || 'idle', importMessage: a.import_message || null, lastHeartbeat: a.last_heartbeat || null }); }
     if (req.method === 'POST' && path === '/config') { const b = await readBody(req); if (!('brand' in b) && !('proxy' in b)) return send(res, 400, { ok: false, message: 'brand and/or proxy required' }); const extra = {}; if ('brand' in b) extra.brand = String(b.brand).trim(); if ('proxy' in b) extra.proxy = String(b.proxy).trim(); await setState((await getAccount()).state || 'none', extra); const a = await getAccount(); return send(res, 200, { ok: true, brand: a.brand || DEFAULT_BRAND, proxy: a.proxy ? 'set' : null }); }
     if (req.method === 'POST' && path === '/proxytest') { try { return send(res, 200, await proxyTest()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && path === '/reverify') { try { return send(res, 200, await reverify()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
@@ -917,6 +943,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && path === '/proxy/quota') { const b = await readBody(req); try { return send(res, 200, await proxySetQuota(b.quotaMb)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/proxy/reset') { try { return send(res, 200, await proxyResetUsage()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
+    if (req.method === 'POST' && path === '/session/import/start') { const b = await readBody(req); try { return send(res, 200, await sessionImportStart(b)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/session/clear') { try { return send(res, 200, await sessionClear()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/login/start') { const b = await readBody(req); if (!b.email) return send(res, 400, { state: 'error', message: 'email required' }); try { return send(res, 200, await loginStart(String(b.email).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }
     if (req.method === 'POST' && path === '/login/code') { const b = await readBody(req); if (!b.code) return send(res, 400, { state: 'error', message: 'code required' }); try { return send(res, 200, await loginCode(String(b.code).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }

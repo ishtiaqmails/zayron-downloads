@@ -20,11 +20,21 @@ function cvSwitchAccount(btn){
   var raw=(document.getElementById('cv-cookies').value||'').trim();
   if(!raw){cvToast('Paste the cookies first');return;}
   var cookies; try{ cookies=JSON.parse(raw); }catch(e){ cvToast('That is not valid JSON'); document.getElementById('cv-acct-msg').textContent='✗ Not valid JSON — use Cookie-Editor → Export → JSON.'; return; }
-  btn.disabled=true; btn.textContent='Switching…'; document.getElementById('cv-acct-msg').textContent='Verifying the new account…';
+  btn.disabled=true; btn.textContent='Switching…'; document.getElementById('cv-acct-msg').textContent='Verifying the new account… (about a minute)';
+  // The import runs in the BACKGROUND on the engine (launching a browser takes ~1 min, too long to hold the
+  // request open), so we kick it off and then poll /status for the result — no long request to time out.
   cvPost('/session/import',{cookies:cookies}).then(function(r){
-    btn.disabled=false; btn.textContent='Switch account';
-    if(r.ok){ cvToast('Account switched'); document.getElementById('cv-acct-msg').innerHTML='✅ '+cvEsc(r.message||'Switched')+(r.brand?(' · brand '+cvEsc(r.brand)):''); document.getElementById('cv-cookies').value=''; cvLoadStatus(); cvLoadCode(true); }
-    else { document.getElementById('cv-acct-msg').textContent='✗ '+(r.message||'Switch failed'); cvToast(r.message||'Switch failed'); }
+    if(!r.ok && !r.started){ btn.disabled=false; btn.textContent='Switch account'; document.getElementById('cv-acct-msg').textContent='✗ '+(r.message||'Switch failed'); cvToast(r.message||'Switch failed'); return; }
+    var tries=0;
+    (function poll(){
+      cvGet('/status').then(function(s){
+        var st=s.importStatus||'idle';
+        if(st==='done'){ btn.disabled=false; btn.textContent='Switch account'; cvToast('Account switched'); document.getElementById('cv-acct-msg').innerHTML='✅ '+cvEsc(s.importMessage||'Switched')+(s.brand?(' · brand '+cvEsc(s.brand)):''); document.getElementById('cv-cookies').value=''; cvLoadStatus(); cvLoadCode(true); return; }
+        if(st==='error'){ btn.disabled=false; btn.textContent='Switch account'; document.getElementById('cv-acct-msg').textContent='✗ '+(s.importMessage||'Switch failed'); cvToast('Switch failed'); return; }
+        if(++tries>60){ btn.disabled=false; btn.textContent='Switch account'; document.getElementById('cv-acct-msg').textContent='Still working… give it a moment, then refresh to confirm.'; return; }
+        setTimeout(poll, 3000);
+      });
+    })();
   });
 }
 

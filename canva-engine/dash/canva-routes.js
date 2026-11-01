@@ -42,6 +42,6 @@ module.exports = function (app, requireAuth) {
   app.get('/canva/api/botcfg',        requireAuth, async (req, res) => pass(res, await engineReq('GET', '/botcfg')));
   app.post('/canva/api/botcfg',       requireAuth, async (req, res) => pass(res, await engineReq('POST', '/botcfg', req.body)));
   app.post('/canva/api/resend',       requireAuth, async (req, res) => pass(res, await engineReq('POST', '/resend', req.body)));
-  app.post('/canva/api/session/import', requireAuth, async (req, res) => pass(res, await engineReq('POST', '/session/import', req.body)));
+  app.post('/canva/api/session/import', requireAuth, async (req, res) => pass(res, await engineReq('POST', '/session/import/start', req.body)));
   app.post('/canva/api/session/clear',  requireAuth, async (req, res) => pass(res, await engineReq('POST', '/session/clear', {})));
 };
