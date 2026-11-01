@@ -8,6 +8,7 @@ function cvToast(t){ var e=document.getElementById('cv-toast'); e.textContent=t;
 function cvCopy(t){ if(!t){cvToast('Nothing to copy');return;} navigator.clipboard.writeText(t).then(function(){cvToast('Copied');},function(){cvToast('Copy failed');}); }
 function cvWhen(iso){ if(!iso)return '—'; try{return new Date(iso).toLocaleString();}catch(e){return iso;} }
 function cvAccess(x){ if(!x.expires_at) return '<span style="color:#059669;font-weight:700;">permanent</span>'; var ms=new Date(x.expires_at).getTime()-Date.now(); if(ms<=0) return '<span style="color:#dc2626;font-weight:700;">expired</span>'; var days=Math.ceil(ms/86400000); return '<span style="color:#6b7280;">ends '+new Date(x.expires_at).toLocaleDateString()+' · '+days+'d</span>'; }
+function cvJoined(x){ if(x.joined_at) return '<span style="color:#059669;font-weight:700;">✅ joined</span> <span style="color:#9ca3af;">'+new Date(x.joined_at).toLocaleDateString()+'</span>'; return '<span style="color:#c2410c;font-weight:700;">⏳ waiting</span>'; }
 
 function cvLoadStatus(){ cvGet('/status').then(function(s){
   document.getElementById('cv-s-state').textContent = s.state==='active'?'Active':(s.state||'—');
@@ -47,10 +48,11 @@ function cvLoadAllow(){ cvGet('/allow').then(function(r){ CV.allow=(r.allow||[])
 function cvRenderAllow(){
   var q=(document.getElementById('cv-allow-search').value||'').trim().toLowerCase();
   var rows=CV.allow.filter(function(x){return !q||x.email.indexOf(q)>=0||String(x.order_ref||'').toLowerCase().indexOf(q)>=0;});
-  document.getElementById('cv-allow-count').textContent=CV.allow.length;
-  cvPage(rows, 'cv-allow-body', 'cv-allow-pager', CV.allowPage, 5, function(np){CV.allowPage=np;cvRenderAllow();}, function(x){
+  var joined=CV.allow.filter(function(x){return x.joined_at;}).length;
+  document.getElementById('cv-allow-count').innerHTML=CV.allow.length+' · <span style="color:#059669;">'+joined+' joined</span>';
+  cvPage(rows, 'cv-allow-body', 'cv-allow-pager', CV.allowPage, 6, function(np){CV.allowPage=np;cvRenderAllow();}, function(x){
     var src=x.source==='order'?'<span class="cv-pill order">order</span>':'<span class="cv-pill">manual</span>';
-    return '<tr><td>'+cvEsc(x.email)+'</td><td>'+src+(x.order_ref?' '+cvEsc(x.order_ref):'')+'</td><td style="color:#9ca3af;">'+cvWhen(x.added_at)+'</td><td>'+cvAccess(x)+'</td><td style="text-align:right;"><button class="cv-btn danger sm" onclick="cvDelAllow(\''+cvEsc(x.email)+'\')">Remove</button></td></tr>';
+    return '<tr><td>'+cvEsc(x.email)+'</td><td>'+src+(x.order_ref?' '+cvEsc(x.order_ref):'')+'</td><td style="color:#9ca3af;">'+cvWhen(x.added_at)+'</td><td>'+cvAccess(x)+'</td><td>'+cvJoined(x)+'</td><td style="text-align:right;"><button class="cv-btn danger sm" onclick="cvDelAllow(\''+cvEsc(x.email)+'\')">Remove</button></td></tr>';
   });
 }
 function cvAddAllow(){

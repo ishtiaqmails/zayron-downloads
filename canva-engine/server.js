@@ -69,6 +69,7 @@ async function initDb() {
     added_at timestamptz NOT NULL DEFAULT NOW()
   )`);
   await db.query(`ALTER TABLE canva_allowlist ADD COLUMN IF NOT EXISTS expires_at timestamptz`);  // order entries expire (1yr); manual = NULL = permanent
+  await db.query(`ALTER TABLE canva_allowlist ADD COLUMN IF NOT EXISTS joined_at timestamptz`);    // set when the email actually appears in the team (join confirmed)
   await db.query(`CREATE TABLE IF NOT EXISTS canva_remove_queue (
     email text PRIMARY KEY,
     status text NOT NULL DEFAULT 'queued',       -- queued|working|done|failed
@@ -95,7 +96,10 @@ async function getProxyRaw() { if (process.env.CANVA_PROXY) return process.env.C
 // ─── allowlist (authorized emails = paid orders + manual additions) ───
 function normEmail(e) { return String(e || '').trim().toLowerCase(); }
 const TERM_DAYS = 365;  // paid Canva order = 1 year of access
-async function listAllow() { const r = await db.query('SELECT email, source, order_ref, note, added_at, expires_at FROM canva_allowlist ORDER BY added_at DESC'); return r.rows; }
+async function listAllow() { const r = await db.query('SELECT email, source, order_ref, note, added_at, expires_at, joined_at FROM canva_allowlist ORDER BY added_at DESC'); return r.rows; }
+// confirm joins: any allowlisted email that now appears in the team gets joined_at stamped (called on every members read — no extra bandwidth)
+async function markJoins(members) { try { const emails = (members || []).map(m => normEmail(m.email)).filter(Boolean); if (!emails.length) return; await db.query('UPDATE canva_allowlist SET joined_at = COALESCE(joined_at, NOW()) WHERE joined_at IS NULL AND email = ANY($1::text[])', [emails]); } catch (e) { log('markJoins', e.message); } }
+async function pendingJoinCount() { try { const r = await db.query("SELECT COUNT(*)::int n FROM canva_allowlist WHERE joined_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())"); return r.rows[0].n; } catch (e) { return 0; } }
 // expiresAt: explicit ISO/Date, or undefined => auto (orders get now+TERM_DAYS, manual stays permanent/NULL)
 async function addAllow(email, source, orderRef, note, expiresAt) { email = normEmail(email); if (!email || !email.includes('@')) return false; source = source || 'manual'; let exp = (expiresAt === undefined) ? (source === 'order' ? new Date(Date.now() + TERM_DAYS * 86400000) : null) : (expiresAt ? new Date(expiresAt) : null); await db.query('INSERT INTO canva_allowlist(email,source,order_ref,note,expires_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(email) DO UPDATE SET source=EXCLUDED.source, order_ref=COALESCE(EXCLUDED.order_ref,canva_allowlist.order_ref), note=COALESCE(EXCLUDED.note,canva_allowlist.note), expires_at=EXCLUDED.expires_at', [email, source, orderRef || null, note || null, exp]); return true; }
 async function removeAllow(email) { await db.query('DELETE FROM canva_allowlist WHERE email=$1', [normEmail(email)]); return true; }
@@ -579,6 +583,7 @@ async function fetchMembers() {
     });
     if (members && members.error) return { ok: false, message: 'members api status ' + members.error };
     log('members fetched: ' + members.length);
+    await markJoins(members);
     return { ok: true, count: members.length, members };
   } catch (e) { log('fetchMembers error', e.message); return { ok: false, message: e.message }; }
   finally { try { await browser.close(); } catch (e) {} unlock(); }
@@ -865,4 +870,6 @@ initDb().then(() => {
   server.listen(PORT, HOST, () => log('canva-engine v2 (headful) listening on http://' + HOST + ':' + PORT + ' DISPLAY=' + process.env.DISPLAY));
   setInterval(() => heartbeat().catch(e => log('hb throw', e.message)), HEARTBEAT_MS);
   runRemoveWorker().catch(e => log('remove worker boot', e.message));  // resume any queued removals after a restart
+  // join watcher: every 20 min, only if someone is waiting to join, read members once (updates joined_at) — skips entirely when nothing is pending, to save proxy GB
+  setInterval(async () => { try { if (LOCK) return; if (await pendingJoinCount() > 0) { await fetchMembers(); } } catch (e) { log('join watcher', e.message); } }, 20 * 60 * 1000);
 }).catch(e => { log('initDb failed', e.message); process.exit(1); });
