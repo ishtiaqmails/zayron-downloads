@@ -147,7 +147,7 @@ table.cv-tbl td{padding:10px 8px;border-bottom:1px solid #f4f5f9;vertical-align:
 <div class="cv-card">
   <div class="cv-card-head">
     <h3>👥 Team members</h3>
-    <div class="cv-tabs"><span class="cv-tab active" id="cv-tab-unknown" onclick="cvTab('unknown')">Not on list</span><span class="cv-tab" id="cv-tab-all" onclick="cvTab('all')">All members</span></div>
+    <div class="cv-tabs"><span class="cv-tab active" id="cv-tab-unknown" onclick="cvTab('unknown')">⚠️ Not authorised</span><span class="cv-tab" id="cv-tab-all" onclick="cvTab('all')">All members</span></div>
   </div>
   <div class="cv-card-body">
     <div class="cv-row" style="gap:8px;flex-wrap:wrap;">
@@ -157,7 +157,7 @@ table.cv-tbl td{padding:10px 8px;border-bottom:1px solid #f4f5f9;vertical-align:
       <input class="cv-inp cv-search" id="cv-scan-search" placeholder="Search…" oninput="cvRenderScan()">
     </div>
     <div class="cv-note" id="cv-scan-meta">Loading the team…</div>
-    <div class="cv-note">Nothing is removed automatically — you tick who to remove and approve it. <b>Protect current members</b> adds everyone already on the account to your authorised list so your pre-automation members are never flagged.</div>
+    <div class="cv-note"><b>⚠️ Not authorised</b> = people in your Canva team who did <b>not</b> come from a paid order and aren't on your list — likely misusing your account. Tick them and <b>Approve removal</b> (runs in the background). <b>✅ Authorised</b> and the owner are never touched. <b>Protect current members</b> marks everyone currently on the account as authorised — use it once for members who existed before automation.</div>
     <div id="cv-bulk" style="display:none;align-items:center;gap:10px;flex-wrap:wrap;margin:12px 0;padding:10px 12px;background:#f5f3ff;border:1px solid #ddd6fe;border-radius:12px;">
       <span id="cv-bulk-count" style="font-weight:700;color:#4c1d95;font-size:13px;"></span>
       <button class="cv-btn safe sm" onclick="cvBulkSafe()">Keep selected (mark safe)</button>
@@ -165,7 +165,7 @@ table.cv-tbl td{padding:10px 8px;border-bottom:1px solid #f4f5f9;vertical-align:
       <span style="flex:1;"></span>
       <span class="cv-note" id="cv-queue-line" style="margin:0;"></span>
     </div>
-    <table class="cv-tbl" style="margin-top:4px;"><thead><tr><th style="width:34px;"><input type="checkbox" id="cv-check-all" onclick="cvCheckAll(this)"></th><th>Email</th><th>Name</th><th>Role</th><th></th></tr></thead><tbody id="cv-scan-body"><tr><td class="cv-empty" colspan="5">—</td></tr></tbody></table>
+    <table class="cv-tbl" style="margin-top:4px;"><thead><tr><th style="width:34px;"><input type="checkbox" id="cv-check-all" onclick="cvCheckAll(this)"></th><th>Email</th><th>Name</th><th>Status</th><th></th></tr></thead><tbody id="cv-scan-body"><tr><td class="cv-empty" colspan="5">—</td></tr></tbody></table>
     <div class="cv-pager" id="cv-scan-pager"></div>
   </div>
 </div>
@@ -173,4 +173,4 @@ table.cv-tbl td{padding:10px 8px;border-bottom:1px solid #f4f5f9;vertical-align:
 <div class="cv-toast" id="cv-toast"></div>
 
 <%- include('partials/footer') %>
-<script src="/js/canva.js?v=7"></script>
+<script src="/js/canva.js?v=8"></script>

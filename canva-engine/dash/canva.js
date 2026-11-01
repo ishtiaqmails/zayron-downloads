@@ -78,7 +78,7 @@ function cvRenderAllow(){
   cvPage(rows, 'cv-allow-body', 'cv-allow-pager', CV.allowPage, 6, function(np){CV.allowPage=np;cvRenderAllow();}, function(x){
     var src=x.source==='order'?'<span class="cv-pill order">order</span>':'<span class="cv-pill">manual</span>';
     var resend=(!x.joined_at && x.customer_phone)?'<button class="cv-btn ghost sm" onclick="cvResend(\''+cvEsc(x.email)+'\')">Resend</button> ':'';
-    return '<tr><td>'+cvEsc(x.email)+'</td><td>'+src+(x.order_ref?' '+cvEsc(x.order_ref):'')+'</td><td style="color:#9ca3af;">'+cvWhen(x.added_at)+'</td><td>'+cvAccess(x)+'</td><td>'+cvJoined(x)+'</td><td style="text-align:right;white-space:nowrap;">'+resend+'<button class="cv-btn danger sm" onclick="cvDelAllow(\''+cvEsc(x.email)+'\')">Remove</button></td></tr>';
+    return '<tr><td>'+cvEsc(x.email)+'</td><td>'+src+(x.order_ref?' '+cvEsc(x.order_ref):'')+'</td><td style="color:#9ca3af;">'+cvWhen(x.added_at)+'</td><td>'+cvAccess(x)+'</td><td>'+cvJoined(x)+'</td><td style="text-align:right;white-space:nowrap;">'+resend+'<button class="cv-btn ghost sm" onclick="cvDelAllow(\''+cvEsc(x.email)+'\')" title="Removes from your authorised list only — does NOT remove them from the Canva team">Un-authorise</button></td></tr>';
   });
 }
 function cvAddAllow(){
@@ -118,15 +118,18 @@ function cvScanRows(){
   var base=CV.scanMode==='all'?CV.members:CV.unknown;
   return base.filter(function(m){return !q||String(m.email||'').indexOf(q)>=0||String(m.name||'').toLowerCase().indexOf(q)>=0;});
 }
+function cvIsAuth(email){ return CV.allow.some(function(x){return x.email===email;}); }
 function cvRenderScan(){
   cvPage(cvScanRows(), 'cv-scan-body', 'cv-scan-pager', CV.scanPage, 5, function(np){CV.scanPage=np;cvRenderScan();}, function(m){
     var owner=m.role==='OWNER';
-    var role=owner?'<span class="cv-pill order">owner</span>':'<span class="cv-pill">member</span>';
+    var auth=cvIsAuth(m.email);
+    // every member is clearly tagged: owner (protected), ✅ authorised (paid order / on your list), or ⚠️ not authorised (likely misuse)
+    var status=owner?'<span class="cv-badge ok">owner</span>':(auth?'<span class="cv-badge ok">✅ authorised</span>':'<span class="cv-badge warn">⚠️ not authorised</span>');
     var e=cvEsc(m.email);
     var chk=owner?'':'<input type="checkbox" '+(CV.selected[m.email]?'checked':'')+' onclick="cvToggleRow(\''+e+'\',this)">';
     var act=owner?'<span style="color:#9ca3af;font-size:12px;">protected</span>'
       :'<button class="cv-btn safe sm" onclick="cvMarkSafe(\''+e+'\')">Keep</button> <button class="cv-btn danger sm" onclick="cvRemove(\''+e+'\',this)">Remove</button>';
-    return '<tr><td>'+chk+'</td><td>'+e+'</td><td style="color:#6b7280;">'+cvEsc(m.name||'')+'</td><td>'+role+'</td><td style="text-align:right;white-space:nowrap;">'+act+'</td></tr>';
+    return '<tr><td>'+chk+'</td><td>'+e+'</td><td style="color:#6b7280;">'+cvEsc(m.name||'')+'</td><td>'+status+'</td><td style="text-align:right;white-space:nowrap;">'+act+'</td></tr>';
   });
   cvBulkBar();
 }
@@ -144,12 +147,11 @@ function cvPollQueue(){ if(CV.polling)return; CV.polling=true; cvBulkBar();
 }
 function cvMarkSafe(email){ cvPost('/allow',{email:email,source:'manual',note:'marked safe'}).then(function(){ cvToast('Marked safe — kept'); cvLoadAllow(); cvComputeUnknown(); cvRenderScan(); }); }
 function cvRemove(email,btn){
-  if(!confirm('Remove '+email+' from the Canva team? This frees their seat.'))return;
-  btn.disabled=true; btn.textContent='Removing…'; cvToast('Removing — up to ~3 min…');
-  cvPost('/remove',{email:email}).then(function(r){
-    if(r.ok&&r.removed){ cvToast('Removed from team'); CV.members=CV.members.filter(function(m){return m.email!==email;}); cvComputeUnknown(); document.getElementById('cv-s-members').textContent=CV.members.length; }
-    else { cvToast(r.message||'Remove failed'); btn.disabled=false; btn.textContent='Remove'; }
-    cvRenderScan();
+  if(!confirm('Remove '+email+' from the Canva team? This frees their seat.\nIt removes in the background — you don\'t have to wait.'))return;
+  btn.disabled=true; btn.textContent='Removing…';
+  cvPost('/remove/batch',{emails:[email]}).then(function(r){
+    if(!r.ok){ cvToast(r.message||'Could not queue'); btn.disabled=false; btn.textContent='Remove'; return; }
+    cvToast('Removing '+email+' in the background…'); cvPollQueue();
   });
 }
 
