@@ -77,10 +77,31 @@ function joinedMsg(email, expiresAt) {
 }
 
 async function sendCodeTo(sock, jid, email, fresh) {
-  const c = await engine('GET', fresh ? '/code/refresh' : '/code');
+  let c = await engine('GET', fresh ? '/code/refresh' : '/code');
+  if (!c.ok) c = await engine('GET', '/code');   // fall back to the cached current code if a fresh fetch is busy
   if (!c.ok) { logger.error('canva code fetch failed', { err: c.message }); return { ok: false, message: c.message }; }
   await sock.sendMessage(jid, { text: joinMsg(email, c) });
   return { ok: true };
+}
+function multiMsg(rows, c) {
+  let exp = 'rotates about every 4 hours';
+  if (c && c.expiresAt) { const d = new Date(c.expiresAt); exp = d.toLocaleString('en-US', { timeZone: 'Asia/Karachi', hour: 'numeric', minute: '2-digit', hour12: true }) + ' · ' + d.toLocaleString('en-GB', { timeZone: 'Asia/Karachi', day: '2-digit', month: '2-digit', year: 'numeric' }); }
+  const list = rows.map((r, i) => (i + 1) + '. ' + r.email + ' — ' + (r.joined_at ? '✅ joined' : '⏳ not joined yet')).join('\n');
+  return [
+    '🎨 *Canva Education — your codes*',
+    '───────────',
+    '',
+    '🔑 *Join code* (same for everyone)',
+    '*' + ((c && c.code) || '') + '*',
+    '🔗 ' + ((c && c.joinLink) || 'https://www.canva.com/class/join'),
+    '⏳ Valid till: ' + exp,
+    '',
+    '👥 *Your customers*',
+    list,
+    '',
+    'Each customer opens the link and joins with THEIR OWN email above — it must match.',
+    '🔄 Reply *canva* anytime for the latest code.'
+  ].join('\n');
 }
 
 // called from inviteVendorService.notifyVendorForOrder when the order is a Canva engine order
@@ -93,10 +114,19 @@ async function deliver(sock, order, product) {
   const phone = normPhone(u.phone);
   const prejoined = {};
   for (const e of emails) { const a = await engine('POST', '/allow', { email: e, source: 'order', order_ref: order.order_no, customer_phone: phone, note: 'bot order ' + order.order_no }); prejoined[String(e).trim().toLowerCase()] = !!(a && a.prejoined); }
-  const c = await engine('GET', '/code');
+  let c = await engine('GET', '/code');
+  if (!c.ok) c = await engine('GET', '/code');
   if (!c.ok) return { ok: false, reason: 'no_code', message: c.message };
   const yearLater = new Date(Date.now() + 365 * 86400000);
-  for (const e of emails) { if (prejoined[String(e).trim().toLowerCase()]) await sock.sendMessage(jid, { text: joinedMsg(e, yearLater) }); else await sock.sendMessage(jid, { text: joinMsg(e, c) }); }
+  if (emails.length === 1) {
+    const e = emails[0];
+    if (prejoined[String(e).trim().toLowerCase()]) await sock.sendMessage(jid, { text: joinedMsg(e, yearLater) });
+    else await sock.sendMessage(jid, { text: joinMsg(e, c) });
+  } else {
+    // reseller order for several customers — one consolidated message with the shared code + each email
+    const rows = emails.map(e => ({ email: e, joined_at: prejoined[String(e).trim().toLowerCase()] ? yearLater : null }));
+    await sock.sendMessage(jid, { text: multiMsg(rows, c) });
+  }
   const newMeta = Object.assign({}, meta, { invite_status: 'engine_delivered', invite_code: c.code, invite_delivered_at: new Date().toISOString(), invite_via: 'canva_engine' });
   try { await db.query('UPDATE orders SET notes=$1 WHERE id=$2', [JSON.stringify(newMeta), order.id]); } catch (e) {}
   try { await db.query('UPDATE canva_allowlist SET last_sent_at=NOW() WHERE email = ANY($1::text[])', [emails.map(x => String(x).trim().toLowerCase())]); } catch (e) {}
@@ -111,16 +141,22 @@ async function maybeResendForText(sock, jid, phone, textLower) {
   if (!['canva', 'canva code', 'get code', 'resend code', 'canva join', 'join code'].includes(textLower)) return false;
   const ph = normPhone(phone), suf = ph.slice(-10);
   logger.info('canva keyword', { phone: ph, suffix: suf });
-  // tolerant match: exact phone OR last-10-digits (handles country-code / LID differences)
-  const r = await db.query("SELECT email, joined_at, expires_at FROM canva_allowlist WHERE (customer_phone=$1 OR right(customer_phone,10)=$2) AND (expires_at IS NULL OR expires_at>NOW()) ORDER BY added_at DESC LIMIT 1", [ph, suf]);
-  if (!r.rows.length) {
+  // tolerant match: exact phone OR last-10-digits (handles country-code / LID differences); ALL of this number's emails
+  const rows = (await db.query("SELECT email, joined_at, expires_at FROM canva_allowlist WHERE (customer_phone=$1 OR right(customer_phone,10)=$2) AND (expires_at IS NULL OR expires_at>NOW()) ORDER BY added_at DESC", [ph, suf])).rows;
+  if (!rows.length) {
     // owner shortcut: let the owner pull the current code by texting "canva" (for testing / manual use)
     try { const ownerPhone = normPhone(require('../../config').owner.phone); if (ownerPhone && suf === ownerPhone.slice(-10)) { const c = await engine('GET', '/code'); if (c.ok) await sock.sendMessage(jid, { text: '🎨 *Canva join code*\n\n*' + (c.code || '') + '*\n' + (c.joinLink || 'https://www.canva.com/class/join') + '\n\n(Owner lookup — code rotates ~every 4h.)' }); return true; } } catch (e) {}
     return false;
   }
-  const row = r.rows[0];
-  if (row.joined_at) await sock.sendMessage(jid, { text: joinedMsg(row.email, row.expires_at) });
-  else await sendCodeTo(sock, jid, row.email, true);
+  const c = await engine('GET', '/code');   // cached current code — fast + reliable (no busy)
+  if (!c.ok) { await sock.sendMessage(jid, { text: 'The Canva code is busy for a moment — please reply *canva* again in a minute.' }); return true; }
+  if (rows.length === 1) {
+    const row = rows[0];
+    if (row.joined_at) await sock.sendMessage(jid, { text: joinedMsg(row.email, row.expires_at) });
+    else await sock.sendMessage(jid, { text: joinMsg(row.email, c) });
+  } else {
+    await sock.sendMessage(jid, { text: multiMsg(rows, c) });   // reseller with many customer emails
+  }
   return true;
 }
 

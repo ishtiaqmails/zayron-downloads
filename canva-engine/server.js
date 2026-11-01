@@ -583,7 +583,7 @@ const CODE_TTL_MS = 4 * 3600 * 1000;
 async function getCode(forceFresh) {
   const a = await getAccount();
   const ageMs = a.code_at ? (Date.now() - new Date(a.code_at).getTime()) : Infinity;
-  if (forceFresh || !a.code || ageMs >= 3.5 * 3600 * 1000) { const f = await fetchCode(forceFresh); if (!f.ok && !a.code) return f; }
+  if (forceFresh || !a.code || ageMs >= 3.5 * 3600 * 1000) { let f; try { f = await fetchCode(forceFresh); } catch (e) { f = { ok: false, message: e.message }; } if (!f.ok && !a.code) return f; }
   const a2 = await getAccount();
   const codeAt = a2.code_at ? new Date(a2.code_at).getTime() : Date.now();
   const expiresAt = codeAt + CODE_TTL_MS;
