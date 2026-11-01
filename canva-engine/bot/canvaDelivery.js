@@ -25,9 +25,9 @@ function normPhone(p) { return String(p || '').replace(/[^0-9]/g, ''); }
 
 async function cfg(key, def) { try { const r = await db.query("SELECT value FROM bot_settings WHERE key=$1", [key]); return r.rows.length ? r.rows[0].value : def; } catch (e) { return def; } }
 async function isEnabled() { return String(await cfg('canva_enabled', '0')) === '1'; }
-async function isEngineMode() { return String(await cfg('canva_delivery_mode', 'vendor')) === 'engine'; }
-async function canvaProductId() { return parseInt(await cfg('canva_product_id', '0'), 10) || 0; }
-async function isEngineOrder(product) { if (!product) return false; if (!(await isEnabled())) return false; if (!(await isEngineMode())) return false; const pid = await canvaProductId(); return pid > 0 && product.id === pid; }
+// auto-detect the Canva product: any vendor_invite product whose name mentions "Canva" — no manual ID needed
+function isCanvaProduct(product) { return !!(product && product.delivery_type === 'vendor_invite' && /canva/i.test(String(product.name || ''))); }
+async function isEngineOrder(product) { if (!(await isEnabled())) return false; return isCanvaProduct(product); }
 
 function joinMsg(email, c) {
   const exp = c && c.expiresAt ? new Date(c.expiresAt).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '(reply "canva" for a fresh code)';

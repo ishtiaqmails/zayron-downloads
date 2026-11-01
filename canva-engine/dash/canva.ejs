@@ -41,10 +41,14 @@ table.cv-tbl td{padding:10px 8px;border-bottom:1px solid #f4f5f9;vertical-align:
 .cv-search{max-width:240px;}
 .cv-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#1e1b4b;color:#fff;padding:11px 18px;border-radius:11px;font-size:13px;font-weight:600;opacity:0;transition:.2s;pointer-events:none;z-index:9999;box-shadow:0 8px 24px rgba(30,27,75,.3);}
 .cv-toast.show{opacity:1;}
-.cv-seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;}
-.cv-segbtn{border:0;background:var(--panel);color:var(--mut);font-family:var(--disp);font-weight:700;font-size:13px;padding:8px 14px;cursor:pointer;}
-.cv-segbtn.on{background:var(--accent);color:#fff;}
-.cv-switch{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--ink);font-weight:600;cursor:pointer;}
+.cv-toggle-wrap{display:inline-flex;align-items:center;gap:12px;cursor:pointer;user-select:none;}
+.cv-toggle-wrap input{position:absolute;opacity:0;width:0;height:0;}
+.cv-slider{width:48px;height:28px;border-radius:20px;background:#cbd2e0;position:relative;transition:.2s;flex:0 0 auto;}
+.cv-slider::after{content:"";position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:.2s;box-shadow:0 1px 3px rgba(0,0,0,.3);}
+.cv-toggle-wrap input:checked + .cv-slider{background:var(--ok);}
+.cv-toggle-wrap input:checked + .cv-slider::after{transform:translateX(20px);}
+.cv-toggle-wrap input:focus-visible + .cv-slider{outline:2px solid var(--accent);outline-offset:2px;}
+.cv-toggle-label{font-weight:700;font-size:14.5px;}
 .cv-prox-top{display:grid;grid-template-columns:auto 1fr auto;gap:18px;align-items:center;}
 .cv-prox-big{font-size:26px;font-weight:900;color:#1e1b4b;line-height:1;}
 .cv-prox-k{font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:.05em;font-weight:700;margin-top:3px;}
@@ -63,18 +67,10 @@ table.cv-tbl td{padding:10px 8px;border-bottom:1px solid #f4f5f9;vertical-align:
 </div>
 
 <div class="cv-card">
-  <div class="cv-card-head"><h3>⚙️ Delivery mode</h3><span class="hint" id="cv-mode-hint"></span></div>
+  <div class="cv-card-head"><h3>⚙️ Automatic delivery</h3><span class="hint" id="cv-mode-hint"></span></div>
   <div class="cv-card-body">
-    <div class="cv-row" style="gap:14px;flex-wrap:wrap;">
-      <div class="cv-seg"><button id="cv-mode-engine" class="cv-segbtn" onclick="cvSetMode('engine')">Automatic (engine)</button><button id="cv-mode-vendor" class="cv-segbtn" onclick="cvSetMode('vendor')">Old vendor</button></div>
-      <label class="cv-switch"><input type="checkbox" id="cv-enabled" onchange="cvToggleEnabled(this)"> Canva automation ON</label>
-    </div>
-    <div class="cv-note" id="cv-mode-note" style="margin-top:10px;"></div>
-    <div class="cv-row" style="margin-top:10px;gap:8px;">
-      <span class="cv-note" style="margin:0;">Canva product ID:</span>
-      <input class="cv-inp" id="cv-pid" style="max-width:120px;" placeholder="95">
-      <button class="cv-btn ghost sm" onclick="cvSetPid()">Save product</button>
-    </div>
+    <label class="cv-toggle-wrap"><input type="checkbox" id="cv-enabled" onchange="cvToggleAuto(this)"><span class="cv-slider"></span><span class="cv-toggle-label" id="cv-toggle-label">Deliver Canva orders automatically</span></label>
+    <div class="cv-note" id="cv-mode-note" style="margin-top:12px;"></div>
   </div>
 </div>
 

@@ -159,22 +159,15 @@ function cvProxyTest(btn){ if(btn){btn.disabled=true;btn.textContent='Testing…
 function cvSetQuota(){ var mb=parseInt((document.getElementById('cv-px-quota').value||'').trim(),10); if(!mb){cvToast('Enter quota in MB');return;} cvPost('/proxy/quota',{quotaMb:mb}).then(function(){cvToast('Quota saved');cvLoadProxy();}); }
 function cvResetUsage(){ if(!confirm('Reset the usage counter to zero?\nDo this right after you top up / buy new GB from IPRoyal.'))return; cvPost('/proxy/reset',{}).then(function(){cvToast('Usage reset');cvLoadProxy();}); }
 
-// ── delivery mode (engine vs old vendor) + resend ──
-function cvLoadMode(){ cvGet('/botcfg').then(function(r){ if(!r.ok||!r.cfg)return; var c=r.cfg;
-  document.getElementById('cv-enabled').checked=!!c.canva_enabled;
-  document.getElementById('cv-mode-engine').classList.toggle('on',c.canva_delivery_mode==='engine');
-  document.getElementById('cv-mode-vendor').classList.toggle('on',c.canva_delivery_mode!=='engine');
-  var pid=document.getElementById('cv-pid'); if(pid && !pid.value && c.canva_product_id) pid.value=c.canva_product_id;
-  document.getElementById('cv-mode-hint').textContent=c.canva_product_id?('product #'+c.canva_product_id):'set product ID';
-  document.getElementById('cv-mode-note').innerHTML = !c.canva_enabled
-    ? '⚪ Automation is OFF — Canva orders behave exactly as before (old vendor flow). Nothing is auto-sent.'
-    : (c.canva_delivery_mode==='engine'
-      ? '✅ Orders deliver automatically: email saved (1 yr), code + link sent, reminders until they join.'
-      : '↩️ Automation on, but delivery is set to your old vendor flow.');
+// ── automatic delivery toggle (ON = engine delivers Canva orders; OFF = old vendor flow) + resend ──
+function cvLoadMode(){ cvGet('/botcfg').then(function(r){ if(!r.ok||!r.cfg)return; var on=!!r.cfg.canva_enabled;
+  document.getElementById('cv-enabled').checked=on;
+  document.getElementById('cv-mode-hint').textContent=on?'ON':'OFF';
+  document.getElementById('cv-mode-note').innerHTML = on
+    ? '✅ Canva orders deliver automatically — the email is saved (1-year), the code + join link are sent, and reminders go out until they join. The Canva product is detected automatically from the order.'
+    : '⚪ OFF — Canva orders use your old vendor flow (the bot notifies your vendor, exactly as before).';
 }); }
-function cvSetMode(m){ cvPost('/botcfg',{canva_delivery_mode:m}).then(function(){cvToast('Delivery: '+(m==='engine'?'Automatic':'Old vendor'));cvLoadMode();}); }
-function cvToggleEnabled(el){ cvPost('/botcfg',{canva_enabled:el.checked}).then(function(){cvToast(el.checked?'Automation ON':'Automation OFF');cvLoadMode();}); }
-function cvSetPid(){ var v=parseInt((document.getElementById('cv-pid').value||'').trim(),10); if(!v){cvToast('Enter the product ID');return;} cvPost('/botcfg',{canva_product_id:v}).then(function(){cvToast('Product saved');cvLoadMode();}); }
+function cvToggleAuto(el){ cvPost('/botcfg',{canva_enabled:el.checked, canva_delivery_mode:(el.checked?'engine':'vendor')}).then(function(){ cvToast(el.checked?'Automatic delivery ON':'Switched to old vendor'); cvLoadMode(); }); }
 function cvResend(email){ cvPost('/resend',{email:email}).then(function(r){ cvToast(r.ok?'Queued — the bot will send it shortly':(r.message||'Could not resend')); }); }
 
 cvLoadStatus(); cvLoadCode(false); cvLoadAllow(); cvLoadProxy(); cvLoadMode();
