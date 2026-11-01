@@ -567,9 +567,8 @@ async function removeMember(email) {
     if (typed) { await page.keyboard.type(email, { delay: 45 }); await sleep(4500); }
     // locate the member's row by its email cell, then click its checkbox (left edge) with a real mouse click
     const target = await page.evaluate((email) => {
-      const nodes = [...document.querySelectorAll('span,td,a,p,div')];
-      let cell = null, best = 1e9;
-      for (const n of nodes) { const t = (n.textContent || '').trim().toLowerCase(); if (t.includes(email) && t.length < 80 && t.length < best) { const r = n.getBoundingClientRect(); if (r.width > 0 && r.height > 0) { cell = n; best = t.length; } } }
+      let cell = null;
+      try { const snap = document.evaluate("//*[contains(translate(text(),'ABCDEFGHIJKLMNOPQRSTUVWXYZ','abcdefghijklmnopqrstuvwxyz'),'" + email + "')]", document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null); cell = snap.singleNodeValue; } catch (e) {}
       if (!cell) return null;
       let row = cell;
       for (let k = 0; k < 8; k++) { const r = row.getBoundingClientRect(); if (r.width > 500) break; if (!row.parentElement) break; row = row.parentElement; }
