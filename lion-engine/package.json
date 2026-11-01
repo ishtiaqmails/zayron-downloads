@@ -1,0 +1,12 @@
+{
+  "name": "lion-engine",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lion OTT / bqpanel.com IPTV automation engine for the reseller bot",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": {
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
