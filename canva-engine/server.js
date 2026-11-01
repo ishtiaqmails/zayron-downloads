@@ -562,23 +562,28 @@ async function removeMember(email) {
     // type email into the People search box
     const typed = await page.evaluate(() => { const i = [...document.querySelectorAll('input')].find(x => { const ph = ((x.getAttribute('placeholder') || '') + ' ' + (x.getAttribute('aria-label') || '')).toLowerCase(); return /search/.test(ph) && /member|name|email/.test(ph); }); if (i) { i.focus(); return true; } return false; });
     if (typed) { await page.keyboard.type(email, { delay: 45 }); await sleep(4000); }
-    // select the target member's checkbox by climbing from each checkbox to a row containing the email (cheap: few checkboxes)
-    const selected = await page.evaluate((email) => {
-      const cbs = [...document.querySelectorAll('input[type=checkbox],[role=checkbox]')];
-      for (const cb of cbs) {
-        const r = cb.getBoundingClientRect(); if (!(r.width > 0 && r.height > 0)) continue;
-        let el = cb;
-        for (let k = 0; k < 7 && el; k++) { el = el.parentElement; if (el && (el.innerText || '').toLowerCase().includes(email)) { cb.click(); return true; } }
-      }
-      return false;
+    // locate the member's row by its email cell, then click its checkbox (left edge) with a real mouse click
+    const target = await page.evaluate((email) => {
+      const nodes = [...document.querySelectorAll('span,td,a,p,div')];
+      let cell = null;
+      for (const n of nodes) { if ((n.textContent || '').trim().toLowerCase() === email) { cell = n; break; } }
+      if (!cell) return null;
+      let row = cell;
+      for (let k = 0; k < 8; k++) { const r = row.getBoundingClientRect(); if (r.width > 500) break; if (!row.parentElement) break; row = row.parentElement; }
+      const r = row.getBoundingClientRect();
+      return { cx: Math.round(r.left + 22), cy: Math.round((r.top + r.bottom) / 2) };
     }, email);
-    await sleep(2000);
-    // click the trash/delete icon in the floating bulk-action bar (bottom strip; it's the last icon)
+    const selected = !!target;
+    if (target) { await page.mouse.click(target.cx, target.cy); }
+    await sleep(2500);
+    // dump + click the trash in the floating bulk-action bar (trash is the last action icon, just before the close X)
     const del = await page.evaluate(() => {
-      const btns = [...document.querySelectorAll('button,[role=button]')].filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top > (window.innerHeight - 170) && r.bottom <= window.innerHeight + 5; });
-      if (!btns.length) return 'no-bar';
-      btns[btns.length - 1].click();
-      return 'clicked-last-of-' + btns.length;
+      const btns = [...document.querySelectorAll('button,[role=button]')].filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top > (window.innerHeight - 190); });
+      const bar = btns.map(b => { const r = b.getBoundingClientRect(); return { x: Math.round(r.left), al: (b.getAttribute('aria-label') || '').slice(0, 24) }; });
+      let clicked = 'none';
+      if (btns.length >= 2) { btns[btns.length - 2].click(); clicked = 'idx' + (btns.length - 2) + '/' + btns.length; }
+      else if (btns.length === 1) { btns[0].click(); clicked = 'idx0/1'; }
+      return { clicked, bar };
     });
     await sleep(2500);
     await clickByText(page, ['remove from team', 'remove', 'delete', 'confirm', 'yes']);
