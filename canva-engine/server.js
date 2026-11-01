@@ -26,7 +26,7 @@ try {
 } catch (e) { /* stealth plugin not installed; fall back to plain puppeteer */ }
 const db = require('/opt/galaxybot/src/db');
 
-const PORT = 4010, HOST = '127.0.0.1';
+const PORT = 4010, HOST = '0.0.0.0';   // bound public so the dashboard opens in a browser; non-local requests require the admin token
 const SHOTS = '/opt/canva-engine/shots';
 const PROFILE = '/opt/canva-engine/profile';                 // persistent, warmed profile
 const DEFAULT_BRAND = 'BAHWa_MJHJI';                         // changeable via /config or CANVA_BRAND env
@@ -58,7 +58,9 @@ async function initDb() {
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS proxy text`);
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS code text`);
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS code_at timestamptz`);
+  await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS admin_token text`);
   await db.query(`INSERT INTO canva_account (id, state) VALUES (1, 'none') ON CONFLICT (id) DO NOTHING`);
+  await db.query(`UPDATE canva_account SET admin_token=$1 WHERE id=1 AND (admin_token IS NULL OR admin_token='')`, [require('crypto').randomBytes(24).toString('hex')]);
   await db.query(`CREATE TABLE IF NOT EXISTS canva_allowlist (
     email text PRIMARY KEY,
     source text NOT NULL DEFAULT 'manual',      -- order|manual
@@ -631,26 +633,139 @@ async function heartbeat() {
 // ─── http server ───
 function readBody(req) { return new Promise(res => { let b = ''; req.on('data', d => b += d); req.on('end', () => { try { res(b ? JSON.parse(b) : {}); } catch (e) { res({}); } }); }); }
 function send(res, code, obj) { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); }
+function isLocal(req) { const a = String(req.socket.remoteAddress || ''); return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1'; }
+
+const ADMIN_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Canva Control</title>
+<style>
+:root{--bg:#f4f6fb;--card:#fff;--ink:#1a2230;--mut:#6b7488;--line:#e7eaf1;--brand:#5b4bff;--ok:#0e9f6e;--warn:#d97706;--danger:#e02424;--chip:#eef0f7}
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--ink);font-size:15px;line-height:1.5}
+.wrap{max-width:860px;margin:0 auto;padding:20px 16px 60px}
+h1{font-size:20px;margin:6px 0 2px;font-weight:700}.sub{color:var(--mut);font-size:13px;margin-bottom:18px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:16px;box-shadow:0 1px 2px rgba(20,30,60,.04)}
+.card h2{font-size:14px;letter-spacing:.02em;text-transform:uppercase;color:var(--mut);margin:0 0 14px;font-weight:600}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.badge{display:inline-block;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:600;background:var(--chip);color:var(--mut)}
+.badge.ok{background:#e7f6ef;color:var(--ok)}.badge.warn{background:#fdf2e3;color:var(--warn)}
+.meta{color:var(--mut);font-size:13px}.meta b{color:var(--ink);font-weight:600}
+.codebox{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:34px;font-weight:700;letter-spacing:.06em;background:#f7f8fc;border:1px dashed #cdd3e4;border-radius:12px;padding:16px 18px;text-align:center;color:#2a2550}
+.expire{font-size:13px;margin-top:8px}
+input,textarea{font:inherit;width:100%;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--ink)}
+textarea{min-height:140px;resize:vertical;font-size:14px}
+button{font:inherit;font-weight:600;cursor:pointer;border:0;border-radius:10px;padding:10px 14px;background:var(--brand);color:#fff}
+button.ghost{background:#eef0f7;color:var(--ink)}button.sm{padding:6px 10px;font-size:13px}
+button.danger{background:#fdecec;color:var(--danger)}button.safe{background:#e7f6ef;color:var(--ok)}
+button:disabled{opacity:.5;cursor:default}
+table{width:100%;border-collapse:collapse;font-size:14px}th,td{text-align:left;padding:8px 6px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase}
+.src{font-size:11px;padding:2px 7px;border-radius:999px;background:var(--chip);color:var(--mut)}
+.src.order{background:#e7f6ef;color:var(--ok)}
+.grid2{display:grid;grid-template-columns:1fr auto;gap:10px}
+.note{color:var(--mut);font-size:12px;margin-top:6px}
+.empty{color:var(--mut);font-size:13px;padding:10px 0}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#1a2230;color:#fff;padding:10px 16px;border-radius:10px;font-size:13px;opacity:0;transition:.2s;pointer-events:none}
+.toast.show{opacity:1}
+@media(max-width:560px){.codebox{font-size:26px}}
+</style></head><body><div class="wrap">
+<h1>Canva Education — Control Panel</h1>
+<div class="sub">Join code, authorised customers, and team clean-up — all in one place.</div>
+
+<div class="card"><h2>Account</h2>
+ <div class="row" style="justify-content:space-between">
+  <div class="row"><span>Status</span> <span id="acctState" class="badge">…</span>
+   <span class="meta">Brand <b id="brand">…</b></span><span class="meta">Proxy <b id="proxy">…</b></span><span class="meta">Last check <b id="hb">…</b></span></div>
+  <button class="ghost sm" onclick="recheck()">Re-check login</button></div>
+</div>
+
+<div class="card"><h2>Join code</h2>
+ <div class="codebox" id="code">…</div>
+ <div class="expire" id="codeMeta"></div>
+ <div class="row" style="margin-top:12px">
+  <button class="ghost sm" onclick="copy(CODE)">Copy code</button>
+  <button class="ghost sm" onclick="copy(LINK)">Copy join link</button>
+  <button class="sm" onclick="loadCode(true)">Refresh code now</button>
+ </div>
+ <input id="link" readonly style="margin-top:10px" value="">
+</div>
+
+<div class="card"><h2>Give code to a customer</h2>
+ <div class="grid2">
+  <input id="custEmail" placeholder="customer email (they must join with this exact email)">
+  <button onclick="buildMsg()">Add + build message</button>
+ </div>
+ <div class="note">This also adds the email to your authorised list, so it is never auto-removed.</div>
+ <textarea id="msg" style="margin-top:10px" placeholder="The ready-to-send message will appear here…"></textarea>
+ <div class="row" style="margin-top:8px"><button class="ghost sm" onclick="copy(document.getElementById('msg').value)">Copy message</button></div>
+</div>
+
+<div class="card"><h2>Authorised emails <span class="meta" id="allowCount"></span></h2>
+ <div class="grid2">
+  <input id="addEmail" placeholder="email to authorise">
+  <button class="ghost" onclick="addAllow()">Add</button>
+ </div>
+ <div class="note">Paid orders are added automatically by the bot. These people are never removed.</div>
+ <table style="margin-top:12px"><thead><tr><th>Email</th><th>From</th><th>Added</th><th></th></tr></thead><tbody id="allowBody"><tr><td class="empty" colspan="4">Loading…</td></tr></tbody></table>
+</div>
+
+<div class="card"><h2>Team check — who is in the team but NOT on your list</h2>
+ <div class="row"><button onclick="scan()">Scan team now</button><span class="meta" id="scanMeta"></span></div>
+ <div class="note">If the auto-cleaner is off you can act here yourself: <b>Mark safe</b> adds them to your list, <b>Remove</b> takes them out of the team.</div>
+ <table style="margin-top:12px"><thead><tr><th>Email</th><th>Name</th><th></th></tr></thead><tbody id="scanBody"><tr><td class="empty" colspan="3">Press “Scan team now”.</td></tr></tbody></table>
+</div>
+
+<div class="toast" id="toast"></div>
+</div>
+<script>
+var TOKEN='__TOKEN__';var CODE='';var LINK='';var EXP=null;
+function api(p,m,b){return fetch(p,{method:m||'GET',headers:{'x-admin-token':TOKEN,'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined}).then(function(r){return r.json();});}
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'})[c];});}
+function toast(t){var e=document.getElementById('toast');e.textContent=t;e.className='toast show';setTimeout(function(){e.className='toast';},1600);}
+function copy(t){if(!t){return;}navigator.clipboard.writeText(t).then(function(){toast('Copied');});}
+function fmtWhen(iso){if(!iso)return '—';try{return new Date(iso).toLocaleString();}catch(e){return iso;}}
+function recheck(){toast('Checking…');api('/reverify').then(loadStatus);}
+function loadStatus(){api('/status').then(function(s){var b=document.getElementById('acctState');b.textContent=s.state||'—';b.className='badge '+(s.state==='active'?'ok':'warn');document.getElementById('brand').textContent=s.brand||'—';document.getElementById('proxy').textContent=s.proxy||'none';document.getElementById('hb').textContent=fmtWhen(s.lastHeartbeat);});}
+function tickExp(){if(!EXP){document.getElementById('codeMeta').textContent='';return;}var ms=new Date(EXP).getTime()-Date.now();var el=document.getElementById('codeMeta');if(ms<=0){el.innerHTML='<span style="color:var(--danger)">Expired — press Refresh code now</span>';return;}var h=Math.floor(ms/3600000),m=Math.floor((ms%3600000)/60000);el.innerHTML='Valid until <b>'+new Date(EXP).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})+'</b> · about '+(h>0?h+'h ':'')+m+'m left';}
+function loadCode(refresh){document.getElementById('code').textContent='…';api('/code'+(refresh?'/refresh':'')).then(function(c){if(!c.ok){document.getElementById('code').textContent='unavailable';document.getElementById('codeMeta').textContent=c.message||'';return;}CODE=c.code;LINK=c.joinLink;EXP=c.expiresAt;document.getElementById('code').textContent=c.code;document.getElementById('link').value=c.joinLink;tickExp();});}
+function buildMsg(){var email=(document.getElementById('custEmail').value||'').trim().toLowerCase();if(!email||email.indexOf('@')<1){toast('Enter a valid email');return;}api('/allow','POST',{email:email,source:'manual',note:'dashboard'}).then(function(){var exp=EXP?new Date(EXP).toLocaleString():'(press Refresh code)';var msg='Welcome to Canva Education 🎨\\n\\nIMPORTANT — join with THIS exact email: '+email+'\\n\\nHow to join:\\n1) Open this link: '+LINK+'\\n   (or go to canva.com/class/join and type the code)\\n2) Join code: '+CODE+'\\n3) Sign in or sign up using the email above — it must match, or you will be removed.\\n\\nCode valid until: '+exp+'\\n\\nOnce you join you get full Canva Pro / Education features. Enjoy!';document.getElementById('msg').value=msg;toast('Added + message ready');loadAllow();});}
+function addAllow(){var email=(document.getElementById('addEmail').value||'').trim().toLowerCase();if(!email||email.indexOf('@')<1){toast('Enter a valid email');return;}api('/allow','POST',{email:email,source:'manual'}).then(function(){document.getElementById('addEmail').value='';toast('Added');loadAllow();});}
+function delAllow(email){if(!confirm('Remove '+email+' from your authorised list? (This does not remove them from the team.)'))return;api('/allow/remove','POST',{email:email}).then(function(){toast('Removed from list');loadAllow();});}
+function loadAllow(){api('/allow').then(function(r){var rows=(r.allow||[]);document.getElementById('allowCount').textContent='('+rows.length+')';var b=document.getElementById('allowBody');if(!rows.length){b.innerHTML='<tr><td class="empty" colspan="4">No authorised emails yet.</td></tr>';return;}b.innerHTML=rows.map(function(x){var src=(x.source==='order')?'<span class="src order">order</span>':'<span class="src">manual</span>';return '<tr><td>'+esc(x.email)+'</td><td>'+src+(x.order_ref?' <span class="meta">'+esc(x.order_ref)+'</span>':'')+'</td><td class="meta">'+fmtWhen(x.added_at)+'</td><td style="text-align:right"><button class="sm danger" onclick="delAllow(\\''+esc(x.email)+'\\')">Remove</button></td></tr>';}).join('');});}
+function scan(){document.getElementById('scanMeta').textContent='Scanning… (can take ~20s)';document.getElementById('scanBody').innerHTML='<tr><td class="empty" colspan="3">Reading the team…</td></tr>';api('/reconcile').then(function(r){if(!r.ok){document.getElementById('scanMeta').textContent=r.message||'error';document.getElementById('scanBody').innerHTML='<tr><td class="empty" colspan="3">'+esc(r.message||'Could not read team')+'</td></tr>';return;}document.getElementById('scanMeta').innerHTML='Team: <b>'+r.total+'</b> · authorised: <b>'+r.authorizedEmails+'</b> · unknown: <b>'+r.removeCandidates.length+'</b>';var b=document.getElementById('scanBody');if(!r.removeCandidates.length){b.innerHTML='<tr><td class="empty" colspan="3">✅ Everyone in the team is on your authorised list.</td></tr>';return;}b.innerHTML=r.removeCandidates.map(function(c){var e=esc(c.email);return '<tr id="r_'+btoa(c.email).replace(/=/g,'')+'"><td>'+e+'</td><td class="meta">'+esc(c.name||'')+'</td><td style="text-align:right"><button class="sm safe" onclick="markSafe(\\''+e+'\\')">Mark safe</button> <button class="sm danger" onclick="removeMember(\\''+e+'\\',this)">Remove</button></td></tr>';}).join('');});}
+function markSafe(email){api('/allow','POST',{email:email,source:'manual',note:'marked safe'}).then(function(){toast('Marked safe');loadAllow();scan();});}
+function removeMember(email,btn){if(!confirm('Remove '+email+' from the Canva team? This frees their seat.'))return;btn.disabled=true;btn.textContent='Removing…';toast('Removing (up to ~3 min)…');api('/remove','POST',{email:email}).then(function(r){if(r.ok&&r.removed){toast('Removed from team');}else{toast(r.message||'Remove failed');btn.disabled=false;btn.textContent='Remove';}scan();});}
+loadStatus();loadCode(false);loadAllow();setInterval(tickExp,30000);setInterval(loadStatus,60000);
+</script></body></html>`;
 
 const server = http.createServer(async (req, res) => {
+  let u; try { u = new URL(req.url, 'http://x'); } catch (e) { return send(res, 400, { error: 'bad url' }); }
+  const path = u.pathname;
+  const token = u.searchParams.get('token') || req.headers['x-admin-token'] || '';
   try {
-    if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true });
-    if (req.method === 'GET' && req.url === '/status') { const a = await getAccount(); return send(res, 200, { email: a.email || null, state: a.state, brand: (a && a.brand) || DEFAULT_BRAND, proxy: (a && a.proxy) ? 'set' : (process.env.CANVA_PROXY ? 'env' : null), stealth: STEALTH, lastHeartbeat: a.last_heartbeat || null }); }
-    if (req.method === 'POST' && req.url === '/config') { const b = await readBody(req); if (!('brand' in b) && !('proxy' in b)) return send(res, 400, { ok: false, message: 'brand and/or proxy required' }); const extra = {}; if ('brand' in b) extra.brand = String(b.brand).trim(); if ('proxy' in b) extra.proxy = String(b.proxy).trim(); await setState((await getAccount()).state || 'none', extra); const a = await getAccount(); return send(res, 200, { ok: true, brand: a.brand || DEFAULT_BRAND, proxy: a.proxy ? 'set' : null }); }
-    if (req.method === 'POST' && req.url === '/proxytest') { try { return send(res, 200, await proxyTest()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
-    if (req.method === 'GET' && req.url === '/reverify') { try { return send(res, 200, await reverify()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
-    if (req.method === 'GET' && (req.url === '/code' || req.url === '/code/refresh')) { try { return send(res, 200, await getCode(req.url.endsWith('refresh'))); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
-    if (req.method === 'GET' && req.url === '/members') { try { return send(res, 200, await fetchMembers()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
-    if (req.method === 'GET' && req.url === '/reconcile') { try { return send(res, 200, await reconcile()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
-    if (req.method === 'GET' && req.url === '/allow') { try { return send(res, 200, { ok: true, allow: await listAllow() }); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
-    if (req.method === 'POST' && req.url === '/allow') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); const okk = await addAllow(b.email, b.source || 'manual', b.order_ref || null, b.note || null); return send(res, 200, { ok: okk, email: normEmail(b.email) }); }
-    if (req.method === 'POST' && req.url === '/allow/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); await removeAllow(b.email); return send(res, 200, { ok: true, removed: normEmail(b.email) }); }
-    if (req.method === 'POST' && req.url === '/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); try { return send(res, 200, await removeMember(b.email)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
-    if (req.method === 'POST' && req.url === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
-    if (req.method === 'POST' && req.url === '/session/clear') { try { return send(res, 200, await sessionClear()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
-    if (req.method === 'POST' && req.url === '/login/start') { const b = await readBody(req); if (!b.email) return send(res, 400, { state: 'error', message: 'email required' }); try { return send(res, 200, await loginStart(String(b.email).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }
-    if (req.method === 'POST' && req.url === '/login/code') { const b = await readBody(req); if (!b.code) return send(res, 400, { state: 'error', message: 'code required' }); try { return send(res, 200, await loginCode(String(b.code).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }
-    if (req.method === 'POST' && req.url === '/invite') { const b = await readBody(req); if (!b.customerEmail) return send(res, 400, { ok: false, result: 'error', message: 'customerEmail required' }); return send(res, 200, await invite(String(b.customerEmail).trim())); }
+    if (req.method === 'GET' && path === '/health') return send(res, 200, { ok: true });
+    // auth gate: localhost (the bot) is trusted; every other client needs the admin token
+    const authAcct = await getAccount();
+    const ADMIN = authAcct.admin_token || '';
+    const authed = isLocal(req) || (ADMIN && token === ADMIN);
+    if (!authed) {
+      if (req.method === 'GET' && path === '/admin') { res.writeHead(401, { 'Content-Type': 'text/html' }); return res.end('<body style="font-family:sans-serif;padding:40px"><h3>Unauthorized</h3><p>Open this page with your admin token: <code>/admin?token=YOUR_TOKEN</code></p></body>'); }
+      return send(res, 401, { error: 'unauthorized' });
+    }
+    if (req.method === 'GET' && path === '/admin') { res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }); return res.end(ADMIN_HTML.replace('__TOKEN__', token || ADMIN)); }
+    if (req.method === 'GET' && path === '/status') { const a = await getAccount(); return send(res, 200, { email: a.email || null, state: a.state, brand: (a && a.brand) || DEFAULT_BRAND, proxy: (a && a.proxy) ? 'set' : (process.env.CANVA_PROXY ? 'env' : null), stealth: STEALTH, lastHeartbeat: a.last_heartbeat || null }); }
+    if (req.method === 'POST' && path === '/config') { const b = await readBody(req); if (!('brand' in b) && !('proxy' in b)) return send(res, 400, { ok: false, message: 'brand and/or proxy required' }); const extra = {}; if ('brand' in b) extra.brand = String(b.brand).trim(); if ('proxy' in b) extra.proxy = String(b.proxy).trim(); await setState((await getAccount()).state || 'none', extra); const a = await getAccount(); return send(res, 200, { ok: true, brand: a.brand || DEFAULT_BRAND, proxy: a.proxy ? 'set' : null }); }
+    if (req.method === 'POST' && path === '/proxytest') { try { return send(res, 200, await proxyTest()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && path === '/reverify') { try { return send(res, 200, await reverify()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && (path === '/code' || path === '/code/refresh')) { try { return send(res, 200, await getCode(path.endsWith('refresh'))); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && path === '/members') { try { return send(res, 200, await fetchMembers()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && path === '/reconcile') { try { return send(res, 200, await reconcile()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && path === '/allow') { try { return send(res, 200, { ok: true, allow: await listAllow() }); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'POST' && path === '/allow') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); const okk = await addAllow(b.email, b.source || 'manual', b.order_ref || null, b.note || null); return send(res, 200, { ok: okk, email: normEmail(b.email) }); }
+    if (req.method === 'POST' && path === '/allow/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); await removeAllow(b.email); return send(res, 200, { ok: true, removed: normEmail(b.email) }); }
+    if (req.method === 'POST' && path === '/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); try { return send(res, 200, await removeMember(b.email)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'POST' && path === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
+    if (req.method === 'POST' && path === '/session/clear') { try { return send(res, 200, await sessionClear()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'POST' && path === '/login/start') { const b = await readBody(req); if (!b.email) return send(res, 400, { state: 'error', message: 'email required' }); try { return send(res, 200, await loginStart(String(b.email).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }
+    if (req.method === 'POST' && path === '/login/code') { const b = await readBody(req); if (!b.code) return send(res, 400, { state: 'error', message: 'code required' }); try { return send(res, 200, await loginCode(String(b.code).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }
+    if (req.method === 'POST' && path === '/invite') { const b = await readBody(req); if (!b.customerEmail) return send(res, 400, { ok: false, result: 'error', message: 'customerEmail required' }); return send(res, 200, await invite(String(b.customerEmail).trim())); }
     return send(res, 404, { error: 'not found' });
   } catch (e) { return send(res, 500, { error: e.message }); }
 });
