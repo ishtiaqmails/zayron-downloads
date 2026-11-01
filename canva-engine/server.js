@@ -82,6 +82,7 @@ async function newPage(browser) {
   if (PROXY_CFG && (PROXY_CFG.username || PROXY_CFG.password)) { try { await page.authenticate({ username: PROXY_CFG.username, password: PROXY_CFG.password }); } catch (e) { log('proxy auth warn', e.message); } }
   await page.setUserAgent(UA);
   await page.setViewport({ width: 1366, height: 900 });
+  await blockHeavy(page);
   return page;
 }
 async function proxyTest() {
@@ -97,6 +98,17 @@ async function proxyTest() {
   finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
 async function shot(page, name) { try { const f = path.join(SHOTS, name + '-' + Date.now() + '.png'); await page.screenshot({ path: f }); log('screenshot', f); return f; } catch (e) { return null; } }
+// Block heavy resources (images/media/fonts) to minimise proxy bandwidth — the invite UI does not need them.
+async function blockHeavy(page) {
+  try {
+    await page.setRequestInterception(true);
+    page.on('request', req => {
+      const t = req.resourceType();
+      if (t === 'image' || t === 'media' || t === 'font') { req.abort().catch(() => { req.continue().catch(() => {}); }); }
+      else { req.continue().catch(() => {}); }
+    });
+  } catch (e) { log('blockHeavy warn', e.message); }
+}
 
 async function clickByText(page, texts, opts) {
   opts = opts || {}; const sels = opts.sel || 'button, a, [role=button]';
