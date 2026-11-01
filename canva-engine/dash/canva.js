@@ -1,5 +1,5 @@
 // Canva Education dashboard — client logic. Talks to /canva/api/* (proxied to the engine).
-var CV = { code:'', link:'', exp:null, allow:[], members:[], unknown:[], authSet:{}, scanMode:'unknown', allowPage:1, scanPage:1, PAGE:12 };
+var CV = { code:'', link:'', exp:null, allow:[], members:[], unknown:[], authSet:{}, scanMode:'unknown', allowPage:1, scanPage:1, PAGE:12, selected:{}, polling:false };
 
 function cvGet(p){ return fetch('/canva/api'+p,{headers:{'Accept':'application/json'}}).then(function(r){return r.json();}).catch(function(e){return {ok:false,message:String(e)};}); }
 function cvPost(p,b){ return fetch('/canva/api'+p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})}).then(function(r){return r.json();}).catch(function(e){return {ok:false,message:String(e)};}); }
@@ -7,6 +7,7 @@ function cvEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){ret
 function cvToast(t){ var e=document.getElementById('cv-toast'); e.textContent=t; e.className='cv-toast show'; clearTimeout(window.__cvtt); window.__cvtt=setTimeout(function(){e.className='cv-toast';},1800); }
 function cvCopy(t){ if(!t){cvToast('Nothing to copy');return;} navigator.clipboard.writeText(t).then(function(){cvToast('Copied');},function(){cvToast('Copy failed');}); }
 function cvWhen(iso){ if(!iso)return '—'; try{return new Date(iso).toLocaleString();}catch(e){return iso;} }
+function cvAccess(x){ if(!x.expires_at) return '<span style="color:#059669;font-weight:700;">permanent</span>'; var ms=new Date(x.expires_at).getTime()-Date.now(); if(ms<=0) return '<span style="color:#dc2626;font-weight:700;">expired</span>'; var days=Math.ceil(ms/86400000); return '<span style="color:#6b7280;">ends '+new Date(x.expires_at).toLocaleDateString()+' · '+days+'d</span>'; }
 
 function cvLoadStatus(){ cvGet('/status').then(function(s){
   document.getElementById('cv-s-state').textContent = s.state==='active'?'Active':(s.state||'—');
@@ -47,9 +48,9 @@ function cvRenderAllow(){
   var q=(document.getElementById('cv-allow-search').value||'').trim().toLowerCase();
   var rows=CV.allow.filter(function(x){return !q||x.email.indexOf(q)>=0||String(x.order_ref||'').toLowerCase().indexOf(q)>=0;});
   document.getElementById('cv-allow-count').textContent=CV.allow.length;
-  cvPage(rows, 'cv-allow-body', 'cv-allow-pager', CV.allowPage, 4, function(np){CV.allowPage=np;cvRenderAllow();}, function(x){
+  cvPage(rows, 'cv-allow-body', 'cv-allow-pager', CV.allowPage, 5, function(np){CV.allowPage=np;cvRenderAllow();}, function(x){
     var src=x.source==='order'?'<span class="cv-pill order">order</span>':'<span class="cv-pill">manual</span>';
-    return '<tr><td>'+cvEsc(x.email)+'</td><td>'+src+(x.order_ref?' '+cvEsc(x.order_ref):'')+'</td><td style="color:#9ca3af;">'+cvWhen(x.added_at)+'</td><td style="text-align:right;"><button class="cv-btn danger sm" onclick="cvDelAllow(\''+cvEsc(x.email)+'\')">Remove</button></td></tr>';
+    return '<tr><td>'+cvEsc(x.email)+'</td><td>'+src+(x.order_ref?' '+cvEsc(x.order_ref):'')+'</td><td style="color:#9ca3af;">'+cvWhen(x.added_at)+'</td><td>'+cvAccess(x)+'</td><td style="text-align:right;"><button class="cv-btn danger sm" onclick="cvDelAllow(\''+cvEsc(x.email)+'\')">Remove</button></td></tr>';
   });
 }
 function cvAddAllow(){
@@ -84,17 +85,34 @@ function cvScan(){
     CV.scanPage=1; cvRenderScan(); cvRenderAllow();
   });
 }
-function cvRenderScan(){
+function cvScanRows(){
   var q=(document.getElementById('cv-scan-search').value||'').trim().toLowerCase();
   var base=CV.scanMode==='all'?CV.members:CV.unknown;
-  var rows=base.filter(function(m){return !q||String(m.email||'').indexOf(q)>=0||String(m.name||'').toLowerCase().indexOf(q)>=0;});
-  cvPage(rows, 'cv-scan-body', 'cv-scan-pager', CV.scanPage, 4, function(np){CV.scanPage=np;cvRenderScan();}, function(m){
-    var role=m.role==='OWNER'?'<span class="cv-pill order">owner</span>':'<span class="cv-pill">member</span>';
+  return base.filter(function(m){return !q||String(m.email||'').indexOf(q)>=0||String(m.name||'').toLowerCase().indexOf(q)>=0;});
+}
+function cvRenderScan(){
+  cvPage(cvScanRows(), 'cv-scan-body', 'cv-scan-pager', CV.scanPage, 5, function(np){CV.scanPage=np;cvRenderScan();}, function(m){
+    var owner=m.role==='OWNER';
+    var role=owner?'<span class="cv-pill order">owner</span>':'<span class="cv-pill">member</span>';
     var e=cvEsc(m.email);
-    var act = m.role==='OWNER' ? '<span style="color:#9ca3af;font-size:12px;">protected</span>'
-      : '<button class="cv-btn safe sm" onclick="cvMarkSafe(\''+e+'\')">Mark safe</button> <button class="cv-btn danger sm" onclick="cvRemove(\''+e+'\',this)">Remove</button>';
-    return '<tr><td>'+e+'</td><td style="color:#6b7280;">'+cvEsc(m.name||'')+'</td><td>'+role+'</td><td style="text-align:right;white-space:nowrap;">'+act+'</td></tr>';
+    var chk=owner?'':'<input type="checkbox" '+(CV.selected[m.email]?'checked':'')+' onclick="cvToggleRow(\''+e+'\',this)">';
+    var act=owner?'<span style="color:#9ca3af;font-size:12px;">protected</span>'
+      :'<button class="cv-btn safe sm" onclick="cvMarkSafe(\''+e+'\')">Keep</button> <button class="cv-btn danger sm" onclick="cvRemove(\''+e+'\',this)">Remove</button>';
+    return '<tr><td>'+chk+'</td><td>'+e+'</td><td style="color:#6b7280;">'+cvEsc(m.name||'')+'</td><td>'+role+'</td><td style="text-align:right;white-space:nowrap;">'+act+'</td></tr>';
   });
+  cvBulkBar();
+}
+function cvToggleRow(email,el){ if(el.checked)CV.selected[email]=1; else delete CV.selected[email]; cvBulkBar(); }
+function cvCheckAll(el){ cvScanRows().filter(function(m){return m.role!=='OWNER';}).forEach(function(m){ if(el.checked)CV.selected[m.email]=1; else delete CV.selected[m.email]; }); cvRenderScan(); }
+function cvSelectedEmails(){ return Object.keys(CV.selected); }
+function cvBulkBar(){ var n=cvSelectedEmails().length; var bar=document.getElementById('cv-bulk'); if(!bar)return; if(n||CV.polling)bar.style.display='flex'; else bar.style.display='none'; var c=document.getElementById('cv-bulk-count'); if(c)c.textContent=n+' selected'; }
+function cvBulkSafe(){ var em=cvSelectedEmails(); if(!em.length){cvToast('Tick some rows first');return;} Promise.all(em.map(function(e){return cvPost('/allow',{email:e,source:'manual',note:'kept (known)'});})).then(function(){ cvToast('Kept '+em.length+' — added to your list'); CV.selected={}; cvLoadAllow(); cvComputeUnknown(); cvRenderScan(); }); }
+function cvBulkRemove(){ var em=cvSelectedEmails(); if(!em.length){cvToast('Tick some rows first');return;} if(!confirm('Approve removal of '+em.length+' member(s) from the Canva team?\nThe engine removes them one-by-one in the background — you don\'t have to wait.'))return; cvPost('/remove/batch',{emails:em}).then(function(r){ if(!r.ok){cvToast(r.message||'Could not queue');return;} cvToast('Approved — removing '+r.queued+' in the background'); CV.selected={}; cvRenderScan(); cvPollQueue(); }); }
+function cvPollQueue(){ if(CV.polling)return; CV.polling=true; cvBulkBar();
+  var tick=function(){ cvGet('/remove/status').then(function(s){ var line=document.getElementById('cv-queue-line'); if(!s.ok){CV.polling=false;cvBulkBar();return;} var c=s.counts||{}; var pending=(c.queued||0)+(c.working||0);
+    if(line)line.innerHTML='Removing — working '+(c.working||0)+', waiting '+(c.queued||0)+', done '+(c.done||0)+(c.failed?(', failed '+c.failed):'');
+    if(pending>0){ setTimeout(tick,5000); } else { CV.polling=false; cvToast('Background removal finished'); cvScan(); } }).catch(function(){CV.polling=false;}); };
+  tick();
 }
 function cvMarkSafe(email){ cvPost('/allow',{email:email,source:'manual',note:'marked safe'}).then(function(){ cvToast('Marked safe — kept'); cvLoadAllow(); cvComputeUnknown(); cvRenderScan(); }); }
 function cvRemove(email,btn){

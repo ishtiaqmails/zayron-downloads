@@ -68,16 +68,26 @@ async function initDb() {
     note text,
     added_at timestamptz NOT NULL DEFAULT NOW()
   )`);
+  await db.query(`ALTER TABLE canva_allowlist ADD COLUMN IF NOT EXISTS expires_at timestamptz`);  // order entries expire (1yr); manual = NULL = permanent
+  await db.query(`CREATE TABLE IF NOT EXISTS canva_remove_queue (
+    email text PRIMARY KEY,
+    status text NOT NULL DEFAULT 'queued',       -- queued|working|done|failed
+    message text,
+    queued_at timestamptz NOT NULL DEFAULT NOW(),
+    done_at timestamptz
+  )`);
 }
 async function getAccount() { const r = await db.query('SELECT * FROM canva_account WHERE id=1'); return r.rows[0] || { state: 'none' }; }
 async function getBrand() { if (process.env.CANVA_BRAND) return process.env.CANVA_BRAND; const a = await getAccount(); return (a && a.brand) || DEFAULT_BRAND; }
 async function getProxyRaw() { if (process.env.CANVA_PROXY) return process.env.CANVA_PROXY; const a = await getAccount(); return (a && a.proxy) || ''; }
 // ─── allowlist (authorized emails = paid orders + manual additions) ───
 function normEmail(e) { return String(e || '').trim().toLowerCase(); }
-async function listAllow() { const r = await db.query('SELECT email, source, order_ref, note, added_at FROM canva_allowlist ORDER BY added_at DESC'); return r.rows; }
-async function addAllow(email, source, orderRef, note) { email = normEmail(email); if (!email || !email.includes('@')) return false; await db.query('INSERT INTO canva_allowlist(email,source,order_ref,note) VALUES($1,$2,$3,$4) ON CONFLICT(email) DO UPDATE SET source=EXCLUDED.source, order_ref=COALESCE(EXCLUDED.order_ref,canva_allowlist.order_ref), note=COALESCE(EXCLUDED.note,canva_allowlist.note)', [email, source || 'manual', orderRef || null, note || null]); return true; }
+const TERM_DAYS = 365;  // paid Canva order = 1 year of access
+async function listAllow() { const r = await db.query('SELECT email, source, order_ref, note, added_at, expires_at FROM canva_allowlist ORDER BY added_at DESC'); return r.rows; }
+// expiresAt: explicit ISO/Date, or undefined => auto (orders get now+TERM_DAYS, manual stays permanent/NULL)
+async function addAllow(email, source, orderRef, note, expiresAt) { email = normEmail(email); if (!email || !email.includes('@')) return false; source = source || 'manual'; let exp = (expiresAt === undefined) ? (source === 'order' ? new Date(Date.now() + TERM_DAYS * 86400000) : null) : (expiresAt ? new Date(expiresAt) : null); await db.query('INSERT INTO canva_allowlist(email,source,order_ref,note,expires_at) VALUES($1,$2,$3,$4,$5) ON CONFLICT(email) DO UPDATE SET source=EXCLUDED.source, order_ref=COALESCE(EXCLUDED.order_ref,canva_allowlist.order_ref), note=COALESCE(EXCLUDED.note,canva_allowlist.note), expires_at=EXCLUDED.expires_at', [email, source, orderRef || null, note || null, exp]); return true; }
 async function removeAllow(email) { await db.query('DELETE FROM canva_allowlist WHERE email=$1', [normEmail(email)]); return true; }
-async function allowSet() { const r = await db.query('SELECT email FROM canva_allowlist'); return new Set(r.rows.map(x => normEmail(x.email))); }
+async function allowSet() { const r = await db.query('SELECT email FROM canva_allowlist WHERE expires_at IS NULL OR expires_at > NOW()'); return new Set(r.rows.map(x => normEmail(x.email))); }
 // parse "http://user:pass@host:port" | "host:port" | "user:pass@host:port" -> {server,username,password} or null
 function parseProxy(s) { s = String(s || '').trim(); if (!s) return null; try { const u = new URL(s.includes('://') ? s : 'http://' + s); return { server: u.protocol + '//' + u.host, username: decodeURIComponent(u.username || ''), password: decodeURIComponent(u.password || '') }; } catch (e) { return null; } }
 let PROXY_CFG = null;
@@ -600,6 +610,37 @@ async function removeMember(email) {
   finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
 
+// ─── approval-gated BULK removal: you approve a set on the dashboard; the engine removes them one-by-one in the background ───
+let REMOVE_WORKER = false;
+async function queueRemovals(emails) {
+  const list = [...new Set((emails || []).map(normEmail).filter(e => e && e.includes('@')))];
+  if (!list.length) return { ok: false, message: 'no valid emails' };
+  for (const e of list) await db.query(`INSERT INTO canva_remove_queue(email,status,message,queued_at,done_at) VALUES($1,'queued',NULL,NOW(),NULL) ON CONFLICT(email) DO UPDATE SET status='queued', message=NULL, queued_at=NOW(), done_at=NULL`, [e]);
+  runRemoveWorker();  // fire-and-forget
+  return { ok: true, queued: list.length };
+}
+async function removeQueueStatus() {
+  const rows = (await db.query(`SELECT email, status, message, queued_at, done_at FROM canva_remove_queue ORDER BY queued_at DESC LIMIT 200`)).rows;
+  const c = (await db.query(`SELECT status, COUNT(*)::int n FROM canva_remove_queue GROUP BY status`)).rows.reduce((a, r) => (a[r.status] = r.n, a), {});
+  return { ok: true, running: REMOVE_WORKER, counts: { queued: c.queued || 0, working: c.working || 0, done: c.done || 0, failed: c.failed || 0 }, rows };
+}
+async function runRemoveWorker() {
+  if (REMOVE_WORKER) return; REMOVE_WORKER = true;
+  log('remove worker: start');
+  try {
+    while (true) {
+      const r = await db.query(`SELECT email FROM canva_remove_queue WHERE status='queued' ORDER BY queued_at ASC LIMIT 1`);
+      if (!r.rows.length) break;
+      const email = r.rows[0].email;
+      await db.query(`UPDATE canva_remove_queue SET status='working' WHERE email=$1`, [email]);
+      let res; try { res = await removeMember(email); } catch (e) { res = { ok: false, message: e.message }; }
+      if (res && res.ok && (res.removed || res.result === 'not_found')) await db.query(`UPDATE canva_remove_queue SET status='done', message=$2, done_at=NOW() WHERE email=$1`, [email, res.result === 'not_found' ? 'already gone' : 'removed']);
+      else await db.query(`UPDATE canva_remove_queue SET status='failed', message=$2, done_at=NOW() WHERE email=$1`, [email, (res && res.message) ? String(res.message).slice(0, 180) : 'failed']);
+    }
+  } catch (e) { log('remove worker error', e.message); }
+  finally { REMOVE_WORKER = false; log('remove worker: idle'); }
+}
+
 // ─── re-verify the stored session (recover from a transient needs_relogin without re-importing) ───
 async function reverify() {
   const acct = await getAccount();
@@ -761,6 +802,8 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && path === '/allow') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); const okk = await addAllow(b.email, b.source || 'manual', b.order_ref || null, b.note || null); return send(res, 200, { ok: okk, email: normEmail(b.email) }); }
     if (req.method === 'POST' && path === '/allow/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); await removeAllow(b.email); return send(res, 200, { ok: true, removed: normEmail(b.email) }); }
     if (req.method === 'POST' && path === '/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); try { return send(res, 200, await removeMember(b.email)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'POST' && path === '/remove/batch') { const b = await readBody(req); try { return send(res, 200, await queueRemovals(b.emails || [])); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && path === '/remove/status') { try { return send(res, 200, await removeQueueStatus()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
     if (req.method === 'POST' && path === '/session/clear') { try { return send(res, 200, await sessionClear()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/login/start') { const b = await readBody(req); if (!b.email) return send(res, 400, { state: 'error', message: 'email required' }); try { return send(res, 200, await loginStart(String(b.email).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }
@@ -773,4 +816,5 @@ const server = http.createServer(async (req, res) => {
 initDb().then(() => {
   server.listen(PORT, HOST, () => log('canva-engine v2 (headful) listening on http://' + HOST + ':' + PORT + ' DISPLAY=' + process.env.DISPLAY));
   setInterval(() => heartbeat().catch(e => log('hb throw', e.message)), HEARTBEAT_MS);
+  runRemoveWorker().catch(e => log('remove worker boot', e.message));  // resume any queued removals after a restart
 }).catch(e => { log('initDb failed', e.message); process.exit(1); });

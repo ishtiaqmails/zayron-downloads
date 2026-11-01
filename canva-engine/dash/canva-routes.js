@@ -30,5 +30,7 @@ module.exports = function (app, requireAuth) {
   app.get('/canva/api/members',       requireAuth, async (req, res) => pass(res, await engineReq('GET', '/members')));
   app.get('/canva/api/reconcile',     requireAuth, async (req, res) => pass(res, await engineReq('GET', '/reconcile')));
   app.post('/canva/api/remove',       requireAuth, async (req, res) => pass(res, await engineReq('POST', '/remove', req.body)));
+  app.post('/canva/api/remove/batch', requireAuth, async (req, res) => pass(res, await engineReq('POST', '/remove/batch', req.body)));
+  app.get('/canva/api/remove/status', requireAuth, async (req, res) => pass(res, await engineReq('GET', '/remove/status')));
   app.get('/canva/api/reverify',      requireAuth, async (req, res) => pass(res, await engineReq('GET', '/reverify')));
 };
