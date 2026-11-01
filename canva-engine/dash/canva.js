@@ -196,8 +196,15 @@ function cvLoadMode(){ cvGet('/botcfg').then(function(r){ if(!r.ok||!r.cfg)retur
   document.getElementById('cv-mode-note').innerHTML = on
     ? '✅ Canva orders deliver automatically — the email is saved (1-year), the code + join link are sent, and reminders go out until they join. The Canva product is detected automatically from the order.'
     : '⚪ OFF — Canva orders use your old vendor flow (the bot notifies your vendor, exactly as before).';
+  // auto-clean toggle + grace
+  var ac=!!r.cfg.canva_autoclean, grace=r.cfg.canva_autoclean_grace_h||2;
+  var acEl=document.getElementById('cv-autoclean'); if(acEl)acEl.checked=ac;
+  var gEl=document.getElementById('cv-autoclean-grace'); if(gEl&&document.activeElement!==gEl)gEl.value=grace;
+  var hEl=document.getElementById('cv-autoclean-hint'); if(hEl)hEl.innerHTML=ac?('<b style="color:#c2410c;">ON</b> — auto-removing unauthorised after '+grace+'h'):'OFF — manual approval only';
 }); }
 function cvToggleAuto(el){ cvPost('/botcfg',{canva_enabled:el.checked, canva_delivery_mode:(el.checked?'engine':'vendor')}).then(function(){ cvToast(el.checked?'Automatic delivery ON':'Switched to old vendor'); cvLoadMode(); }); }
+function cvToggleAutoClean(el){ cvPost('/botcfg',{canva_autoclean:el.checked}).then(function(){ cvToast(el.checked?'Auto-clean ON':'Auto-clean OFF'); cvLoadMode(); }); }
+function cvSaveGrace(){ var g=parseFloat((document.getElementById('cv-autoclean-grace').value||'').trim()); if(!(g>0)){cvToast('Enter grace in hours (e.g. 2)');return;} cvPost('/botcfg',{canva_autoclean_grace_h:g}).then(function(){ cvToast('Grace saved: '+g+'h'); cvLoadMode(); }); }
 function cvResend(email){ cvPost('/resend',{email:email}).then(function(r){ cvToast(r.ok?'Queued — the bot will send it shortly':(r.message||'Could not resend')); }); }
 
 // show the last-saved team instantly on open (no live browser op); Scan refreshes it live

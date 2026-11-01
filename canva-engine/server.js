@@ -90,6 +90,7 @@ async function initDb() {
   await db.query(`CREATE TABLE IF NOT EXISTS canva_members (email text PRIMARY KEY, seen_at timestamptz NOT NULL DEFAULT NOW())`);  // snapshot of who is in the team right now
   await db.query(`ALTER TABLE canva_members ADD COLUMN IF NOT EXISTS name text`);
   await db.query(`ALTER TABLE canva_members ADD COLUMN IF NOT EXISTS role text`);
+  await db.query(`ALTER TABLE canva_members ADD COLUMN IF NOT EXISTS first_seen_at timestamptz NOT NULL DEFAULT NOW()`);  // when the member first appeared — for the auto-clean grace period
   await db.query(`CREATE TABLE IF NOT EXISTS canva_remove_queue (
     email text PRIMARY KEY,
     status text NOT NULL DEFAULT 'queued',       -- queued|working|done|failed
@@ -129,8 +130,8 @@ async function protectExisting() { const mem = await fetchMembers(); if (!mem.ok
 // expiresAt: explicit ISO/Date, or undefined => auto (orders get now+TERM_DAYS, manual stays permanent/NULL)
 async function addAllow(email, source, orderRef, note, expiresAt, customerPhone) { email = normEmail(email); if (!email || !email.includes('@')) return false; source = source || 'manual'; let exp = (expiresAt === undefined) ? (source === 'order' ? new Date(Date.now() + TERM_DAYS * 86400000) : null) : (expiresAt ? new Date(expiresAt) : null); const ph = customerPhone ? String(customerPhone).replace(/[^0-9]/g, '') : null; await db.query('INSERT INTO canva_allowlist(email,source,order_ref,note,expires_at,customer_phone) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(email) DO UPDATE SET source=EXCLUDED.source, order_ref=COALESCE(EXCLUDED.order_ref,canva_allowlist.order_ref), note=COALESCE(EXCLUDED.note,canva_allowlist.note), expires_at=EXCLUDED.expires_at, customer_phone=COALESCE(EXCLUDED.customer_phone,canva_allowlist.customer_phone)', [email, source, orderRef || null, note || null, exp, ph]); return true; }
 // bot-delivery config lives in bot_settings (same DB); the dashboard toggles it, the bot reads it
-async function getBotCfg() { const r = await db.query("SELECT key, value FROM bot_settings WHERE key = ANY($1::text[])", [['canva_enabled', 'canva_delivery_mode', 'canva_product_id']]); const m = {}; r.rows.forEach(x => m[x.key] = x.value); return { canva_enabled: String(m.canva_enabled || '0') === '1', canva_delivery_mode: m.canva_delivery_mode || 'vendor', canva_product_id: parseInt(m.canva_product_id || '0', 10) || 0 }; }
-async function setBotCfg(b) { const up = (k, v) => db.query("INSERT INTO bot_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2", [k, String(v)]); if ('canva_enabled' in b) await up('canva_enabled', b.canva_enabled ? '1' : '0'); if ('canva_delivery_mode' in b) await up('canva_delivery_mode', b.canva_delivery_mode === 'engine' ? 'engine' : 'vendor'); if ('canva_product_id' in b) await up('canva_product_id', parseInt(b.canva_product_id, 10) || 0); return await getBotCfg(); }
+async function getBotCfg() { const r = await db.query("SELECT key, value FROM bot_settings WHERE key = ANY($1::text[])", [['canva_enabled', 'canva_delivery_mode', 'canva_product_id', 'canva_autoclean', 'canva_autoclean_grace_h']]); const m = {}; r.rows.forEach(x => m[x.key] = x.value); return { canva_enabled: String(m.canva_enabled || '0') === '1', canva_delivery_mode: m.canva_delivery_mode || 'vendor', canva_product_id: parseInt(m.canva_product_id || '0', 10) || 0, canva_autoclean: String(m.canva_autoclean || '0') === '1', canva_autoclean_grace_h: parseFloat(m.canva_autoclean_grace_h || '2') || 2 }; }
+async function setBotCfg(b) { const up = (k, v) => db.query("INSERT INTO bot_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2", [k, String(v)]); if ('canva_enabled' in b) await up('canva_enabled', b.canva_enabled ? '1' : '0'); if ('canva_delivery_mode' in b) await up('canva_delivery_mode', b.canva_delivery_mode === 'engine' ? 'engine' : 'vendor'); if ('canva_product_id' in b) await up('canva_product_id', parseInt(b.canva_product_id, 10) || 0); if ('canva_autoclean' in b) await up('canva_autoclean', b.canva_autoclean ? '1' : '0'); if ('canva_autoclean_grace_h' in b) { let g = parseFloat(b.canva_autoclean_grace_h); if (!(g > 0)) g = 2; await up('canva_autoclean_grace_h', g); } return await getBotCfg(); }
 // dashboard "Resend code" → queue a send the bot's scheduler will pick up (only the bot can send WhatsApp)
 async function resendRequest(email) { email = normEmail(email); if (!email) return { ok: false, message: 'email required' }; const r = await db.query('SELECT customer_phone FROM canva_allowlist WHERE email=$1', [email]); const phone = r.rows[0] && r.rows[0].customer_phone; if (!phone) return { ok: false, message: 'No customer phone on file for this email — use “Give to a customer” to send it.' }; await db.query("INSERT INTO canva_outbox(kind,email,phone,status) VALUES('resend',$1,$2,'queued')", [email, phone]); return { ok: true, queued: email }; }
 async function removeAllow(email) { await db.query('DELETE FROM canva_allowlist WHERE email=$1', [normEmail(email)]); return true; }
@@ -671,6 +672,27 @@ async function fetchMembers() {
   } catch (e) { log('fetchMembers error', e.message); return { ok: false, message: e.message }; }
   finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
+// ─── auto-clean: automatically remove unauthorised members (not owner, not on the allowlist) once
+// they've been in the team longer than the grace period. Off by default; toggled from the dashboard. ───
+let AUTOCLEAN_RUNNING = false;
+async function autoClean() {
+  if (AUTOCLEAN_RUNNING || LOCK) return;
+  const cfg = await getBotCfg();
+  if (!cfg.canva_autoclean) return;
+  AUTOCLEAN_RUNNING = true;
+  try {
+    const graceH = cfg.canva_autoclean_grace_h || 2;
+    const mem = await fetchMembers();   // refresh the snapshot (sets first_seen_at for any new joiners)
+    if (!mem.ok) { log('autoclean: could not read members — ' + (mem.message || '')); return; }
+    const allow = await allowSet();
+    const r = await db.query("SELECT email FROM canva_members WHERE role = 'MEMBER' AND first_seen_at < NOW() - make_interval(mins => $1)", [Math.round(graceH * 60)]);
+    const candidates = r.rows.map(x => normEmail(x.email)).filter(e => e && e.includes('@') && !allow.has(e));
+    if (!candidates.length) { log('autoclean: nobody past grace to remove'); return; }
+    log('autoclean: removing ' + candidates.length + ' unauthorised member(s) past ' + graceH + 'h grace');
+    await queueRemovals(candidates);
+  } catch (e) { log('autoclean', e.message); }
+  finally { AUTOCLEAN_RUNNING = false; }
+}
 // Report-only reconcile: who is in the team but NOT on the allowlist (never OWNER / non-members).
 async function reconcile() {
   const mem = await fetchMembers();
@@ -966,4 +988,7 @@ initDb().then(() => {
       if (young || Date.now() - LAST_SLOW_MEMBERS > 20 * 60 * 1000) { await fetchMembers(); if (!young) LAST_SLOW_MEMBERS = Date.now(); }
     } catch (e) { log('join watcher', e.message); }
   }, 2 * 60 * 1000);
+  // auto-clean watcher: every 30 min, if enabled, remove unauthorised members past the grace period (no-op when the toggle is off)
+  setInterval(() => autoClean().catch(e => log('autoclean throw', e.message)), 30 * 60 * 1000);
+  setTimeout(() => autoClean().catch(() => {}), 90 * 1000);  // one run shortly after boot too
 }).catch(e => { log('initDb failed', e.message); process.exit(1); });
