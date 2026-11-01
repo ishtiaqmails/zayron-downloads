@@ -16,7 +16,14 @@ if (!process.env.DISPLAY) process.env.DISPLAY = ':99';   // headful needs an X d
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
-const puppeteer = require('/opt/galaxybot/node_modules/puppeteer');
+const puppeteerBase = require('/opt/galaxybot/node_modules/puppeteer');
+let puppeteer = puppeteerBase, STEALTH = false;
+try {
+  const { addExtra } = require('/opt/canva-engine/node_modules/puppeteer-extra');
+  puppeteer = addExtra(puppeteerBase);
+  puppeteer.use(require('/opt/canva-engine/node_modules/puppeteer-extra-plugin-stealth')());
+  STEALTH = true;
+} catch (e) { /* stealth plugin not installed; fall back to plain puppeteer */ }
 const db = require('/opt/galaxybot/src/db');
 
 const PORT = 4010, HOST = '127.0.0.1';
@@ -79,16 +86,7 @@ async function launch() { await loadProxy(); const args = PROXY_CFG ? ARGS.conca
 async function newPage(browser) {
   const pages = await browser.pages();
   const page = pages.length ? pages[0] : await browser.newPage();
-  // Stealth: hide the automation tells reCAPTCHA scores on, so assess can clear.
-  try {
-    await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-      Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-      Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-      window.chrome = window.chrome || { runtime: {} };
-      try { const q = window.navigator.permissions && window.navigator.permissions.query; if (q) window.navigator.permissions.query = (p) => (p && p.name === 'notifications') ? Promise.resolve({ state: Notification.permission }) : q(p); } catch (e) {}
-    });
-  } catch (e) { log('stealth warn', e.message); }
+  // puppeteer-extra-plugin-stealth (when loaded) applies comprehensive fingerprint evasions automatically.
   if (PROXY_CFG && (PROXY_CFG.username || PROXY_CFG.password)) { try { await page.authenticate({ username: PROXY_CFG.username, password: PROXY_CFG.password }); } catch (e) { log('proxy auth warn', e.message); } }
   await page.setUserAgent(UA);
   await page.setViewport({ width: 1366, height: 900 });
@@ -285,7 +283,21 @@ async function alreadyInvited(page, brand, target) {
   for (const e of arr) { if (e && typeof e === 'object') { for (const k in e) { const v = e[k]; if (typeof v === 'string' && v.toLowerCase() === target) return true; } } }
   return false;
 }
-// Trusted click (real mouse via CDP, isTrusted=true) on the smallest button matching rx.
+const humanPause = () => sleep(400 + Math.floor(Math.random() * 700));
+// Wait (lightweight) until a visible button matching rx exists.
+async function waitForButton(page, rxSource, maxLen, ms) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const found = await page.evaluate((rxSource, maxLen) => {
+      const rx = new RegExp(rxSource, 'i');
+      return [...document.querySelectorAll('button,[role=button]')].some(e => { const r = e.getBoundingClientRect(); const t = (e.innerText || e.textContent || '').replace(/\s+/g, ' ').trim(); return r.width > 0 && r.height > 0 && rx.test(t) && t.length <= maxLen; });
+    }, rxSource, maxLen).catch(() => false);
+    if (found) return true;
+    await sleep(1000);
+  }
+  return false;
+}
+// Trusted click (real mouse via CDP, isTrusted=true) with a humanised pre-move, on the smallest button matching rx.
 async function clickExactTrusted(page, rxSource, maxLen) {
   const handle = await page.evaluateHandle((rxSource, maxLen) => {
     const rx = new RegExp(rxSource, 'i');
@@ -296,17 +308,16 @@ async function clickExactTrusted(page, rxSource, maxLen) {
   }, rxSource, maxLen);
   const el = handle.asElement();
   if (!el) { await handle.dispose(); return false; }
-  try { await el.click({ delay: 40 }); } catch (e) { await el.dispose(); return false; }
+  try { await page.mouse.move(180 + Math.random() * 500, 160 + Math.random() * 360, { steps: 6 }); } catch (e) {}
+  try { await el.click({ delay: 50 + Math.floor(Math.random() * 70) }); } catch (e) { await el.dispose(); return false; }
   await el.dispose();
   return true;
 }
 async function openInviteDialog(page) {
-  let clicked = false;
-  for (let i = 0; i < 45 && !clicked; i++) {
-    if (await clickExactTrusted(page, 'invite students', 40)) { clicked = true; break; }
-    await sleep(1000);
-  }
-  if (!clicked) { // fallback path: avatar -> Teams -> team -> Invite people
+  if (await waitForButton(page, 'invite students', 40, 45000)) {
+    await humanPause();
+    await clickExactTrusted(page, 'invite students', 40);
+  } else { // fallback path: avatar -> Teams -> team -> Invite people
     await clickByText(page, [''], { sel: '[aria-label*=Account i],[aria-label*=profile i],header img,nav img' }).catch(() => {});
     await sleep(900);
     await clickByText(page, ['teams', 'team']); await sleep(900);
@@ -333,12 +344,9 @@ async function typeEmail(page, email) {
   return true;
 }
 async function clickSend(page, ms) {
-  const deadline = Date.now() + ms;
-  while (Date.now() < deadline) {
-    if (await clickExactTrusted(page, 'send invitations', 30)) return true;
-    await sleep(600);
-  }
-  return false;
+  if (!await waitForButton(page, 'send invitations', 30, ms)) return false;
+  await humanPause();
+  return await clickExactTrusted(page, 'send invitations', 30);
 }
 async function invite(customerEmail) {
   const gap = Date.now() - lastInviteAt; if (gap < INVITE_MIN_GAP_MS) await sleep(INVITE_MIN_GAP_MS - gap);
@@ -398,7 +406,7 @@ function send(res, code, obj) { res.writeHead(code, { 'Content-Type': 'applicati
 const server = http.createServer(async (req, res) => {
   try {
     if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true });
-    if (req.method === 'GET' && req.url === '/status') { const a = await getAccount(); return send(res, 200, { email: a.email || null, state: a.state, brand: (a && a.brand) || DEFAULT_BRAND, proxy: (a && a.proxy) ? 'set' : (process.env.CANVA_PROXY ? 'env' : null), lastHeartbeat: a.last_heartbeat || null }); }
+    if (req.method === 'GET' && req.url === '/status') { const a = await getAccount(); return send(res, 200, { email: a.email || null, state: a.state, brand: (a && a.brand) || DEFAULT_BRAND, proxy: (a && a.proxy) ? 'set' : (process.env.CANVA_PROXY ? 'env' : null), stealth: STEALTH, lastHeartbeat: a.last_heartbeat || null }); }
     if (req.method === 'POST' && req.url === '/config') { const b = await readBody(req); if (!('brand' in b) && !('proxy' in b)) return send(res, 400, { ok: false, message: 'brand and/or proxy required' }); const extra = {}; if ('brand' in b) extra.brand = String(b.brand).trim(); if ('proxy' in b) extra.proxy = String(b.proxy).trim(); await setState((await getAccount()).state || 'none', extra); const a = await getAccount(); return send(res, 200, { ok: true, brand: a.brand || DEFAULT_BRAND, proxy: a.proxy ? 'set' : null }); }
     if (req.method === 'POST' && req.url === '/proxytest') { try { return send(res, 200, await proxyTest()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && req.url === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
