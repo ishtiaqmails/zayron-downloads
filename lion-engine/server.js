@@ -219,8 +219,17 @@ async function doLogin(page) {
   const acct = await getAccount();
   if (!acct.panel_user || !acct.panel_pass) throw new Error('panel credentials not set — POST /config {panel_user,panel_pass} first');
   await page.goto(BASE + '/login', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await sleep(2500);
+  await sleep(3500);
   if (await isLoggedIn(page)) return true;   // cookie still good, server bounced us to dashboard
+  // diagnostics — capture exactly what the login page looks like through the proxy
+  const diag = await page.evaluate(() => {
+    const inputs = [...document.querySelectorAll('input')].map(i => ({ type: i.type, name: i.name || '', ph: i.placeholder || '' }));
+    const buttons = [...document.querySelectorAll('button, input[type=submit]')].map(b => (b.innerText || b.value || '').trim()).filter(Boolean).slice(0, 8);
+    const skEl = document.querySelector('[data-sitekey]');
+    const m = (document.documentElement.innerHTML || '').match(/sitekey["'\s:=]+([0-9a-zA-Z_-]{10,})/);
+    return { url: location.href, title: document.title, inputs, buttons, sitekey: (skEl && skEl.getAttribute('data-sitekey')) || (m && m[1]) || null, cf: !!document.querySelector('.cf-turnstile, iframe[src*=turnstile], iframe[src*="challenges.cloudflare"]'), challenge: /just a moment|checking your browser|verify you are human|attention required/i.test(document.body.innerText || ''), snippet: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 220) };
+  }).catch(e => ({ err: e.message }));
+  log('login diag', JSON.stringify(diag));
   // fill username + password (first text/email input, first password input)
   await page.evaluate((u, p) => {
     const setVal = (el, v) => { if (!el) return; const d = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set; d.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); };
@@ -254,7 +263,13 @@ async function doLogin(page) {
   // wait for dashboard
   await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
   const ok = await isLoggedIn(page);
-  if (!ok) { await shot(page, 'login-fail'); throw new Error('login did not reach dashboard (check credentials / Turnstile)'); }
+  if (!ok) {
+    await shot(page, 'login-fail');
+    const post = await page.evaluate(() => ({ url: location.href, title: document.title, snippet: (document.body.innerText || '').replace(/\s+/g, ' ').slice(0, 220) })).catch(() => ({}));
+    const err = new Error('login did not reach dashboard (check credentials / Turnstile)');
+    err.diag = { before: diag, after: post };
+    throw err;
+  }
   const storage = await saveStorage(page);
   await setAccount({ state: 'active', storage, heartbeat: true });
   log('login OK, session persisted');
@@ -550,7 +565,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && p === '/status') { const a = await getAccount(); return send(res, 200, { state: a.state, credits: a.credits != null ? Number(a.credits) : null, proxy: a.proxy ? 'set' : (process.env.LION_PROXY ? 'env' : null), stealth: STEALTH, hasCreds: !!(a.panel_user && a.panel_pass), bouquet: a.bouquet, lastHeartbeat: a.last_heartbeat || null }); }
     if (req.method === 'POST' && p === '/config') { const b = await readBody(req); const f = {}; for (const k of ['panel_user', 'panel_pass', 'proxy', 'base_url', 'bouquet']) if (k in b) f[k] = String(b[k]).trim(); if (!Object.keys(f).length) return send(res, 400, { ok: false, message: 'nothing to set' }); await setAccount(f); const a = await getAccount(); return send(res, 200, { ok: true, hasCreds: !!(a.panel_user && a.panel_pass), proxy: a.proxy ? 'set' : null, bouquet: a.bouquet }); }
     if (req.method === 'POST' && p === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
-    if (req.method === 'POST' && p === '/login') { try { await lock(); const browser = await launch(); try { const page = await newPage(browser); await doLogin(page); return send(res, 200, { ok: true, state: 'active' }); } finally { try { await browser.close(); } catch (e) {} unlock(); } } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'POST' && p === '/login') { try { await lock(); const browser = await launch(); try { const page = await newPage(browser); await doLogin(page); return send(res, 200, { ok: true, state: 'active' }); } finally { try { await browser.close(); } catch (e) {} unlock(); } } catch (e) { return send(res, 200, { ok: false, message: e.message, diag: e.diag || null }); } }
     if (req.method === 'GET' && p === '/credits') { try { return send(res, 200, await getCredits()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && p === '/create') { const b = await readBody(req); try { return send(res, 200, await createLine(b)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && p === '/renew') { const b = await readBody(req); try { return send(res, 200, await renewLine(b)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
