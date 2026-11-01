@@ -547,10 +547,11 @@ async function removeMember(email) {
   if (acct.state !== 'active' || !acct.storage_state) return { ok: false, message: 'No active Canva session' };
   await lock();
   const browser = await launch();
-  const netLog = [];
+  const netLog = []; let batchBody = null;
   try {
     const page = await newPage(browser);
-    page.on('response', async (res) => { try { const m = res.request().method(); const u = res.url(); if (m !== 'GET' && /\/_ajax\//.test(u) && /member|brand|remove|delete|revoke|membership/i.test(u)) netLog.push(m + ' ' + res.status() + ' ' + u.replace('https://www.canva.com', '').split('?')[0]); } catch (e) {} });
+    page.on('request', req => { try { if (req.method() === 'POST' && /memberships\/batch/i.test(req.url())) { const b = req.postData(); if (b) batchBody = b.slice(0, 900); } } catch (e) {} });
+    page.on('response', async (res) => { try { const m = res.request().method(); const u = res.url(); if (m !== 'GET' && /\/_ajax\//.test(u) && /member|brand|remove|delete|revoke|membership|group/i.test(u)) netLog.push(m + ' ' + res.status() + ' ' + u.replace('https://www.canva.com', '').split('?')[0]); } catch (e) {} });
     await restoreStorage(page, acct.storage_state);
     if (!await isLoggedIn(page)) { await setState('needs_relogin'); return { ok: false, result: 'needs_relogin', message: 'Session expired' }; }
     await page.goto('https://www.canva.com/settings/people', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
@@ -559,16 +560,19 @@ async function removeMember(email) {
     const existsBefore = await page.evaluate(async (email) => { try { const r = await fetch('/_ajax/profilesearch/search_brand_members?searchEmail=' + encodeURIComponent(email) + '&projection=B&projection=C&projection=D&limit=10', { credentials: 'include' }); let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); const j = JSON.parse(t); return (j.results || []).some(m => m.C && String(m.C.email || '').toLowerCase() === email); } catch (e) { return null; } }, email);
     if (existsBefore === false) return { ok: false, result: 'not_found', message: 'Member not in team: ' + email };
     // type email into the People search box
-    const typed = await page.evaluate(() => { const i = [...document.querySelectorAll('input')].find(x => /search members/i.test((x.getAttribute('placeholder') || '') + (x.getAttribute('aria-label') || ''))); if (i) { i.focus(); return true; } return false; });
-    if (typed) { await page.keyboard.type(email, { delay: 45 }); }
-    await sleep(4500);
-    // select the first data-row checkbox (skip the header select-all at the very top)
-    const selected = await page.evaluate(() => {
-      const cbs = [...document.querySelectorAll('input[type=checkbox],[role=checkbox]')].filter(c => { const r = c.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top > 300; });
-      if (cbs.length) { cbs[0].click(); return true; }
+    const typed = await page.evaluate(() => { const i = [...document.querySelectorAll('input')].find(x => { const ph = ((x.getAttribute('placeholder') || '') + ' ' + (x.getAttribute('aria-label') || '')).toLowerCase(); return /search/.test(ph) && /member|name|email/.test(ph); }); if (i) { i.focus(); return true; } return false; });
+    if (typed) { await page.keyboard.type(email, { delay: 45 }); await sleep(4000); }
+    // select the checkbox in the row that contains the target email (works filtered or unfiltered)
+    const selected = await page.evaluate((email) => {
+      const all = [...document.querySelectorAll('tr,[role=row],li,div')];
+      const rows = all.filter(r => { const txt = (r.innerText || '').toLowerCase(); return txt.includes(email) && r.querySelector('input[type=checkbox],[role=checkbox]') && (r.innerText || '').length < 220; });
+      rows.sort((a, b) => (a.innerText || '').length - (b.innerText || '').length);
+      const row = rows[0]; if (!row) return false;
+      const cb = row.querySelector('input[type=checkbox],[role=checkbox]');
+      if (cb) { cb.click(); return true; }
       return false;
-    });
-    await sleep(1800);
+    }, email);
+    await sleep(2000);
     // click the trash/delete button in the floating bulk-action bar (it's the last icon)
     const del = await page.evaluate(() => {
       let bar = [...document.querySelectorAll('div,section,footer')].find(e => /\bselected\b/i.test(e.innerText || '') && e.getBoundingClientRect().top > 480 && e.querySelectorAll('button,[role=button]').length >= 2);
@@ -581,9 +585,9 @@ async function removeMember(email) {
     await clickByText(page, ['remove from team', 'remove', 'delete', 'confirm', 'yes']);
     await sleep(3500);
     const existsAfter = await page.evaluate(async (email) => { try { const r = await fetch('/_ajax/profilesearch/search_brand_members?searchEmail=' + encodeURIComponent(email) + '&projection=B&projection=C&projection=D&limit=10', { credentials: 'include' }); let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); const j = JSON.parse(t); return (j.results || []).some(m => m.C && String(m.C.email || '').toLowerCase() === email); } catch (e) { return null; } }, email);
-    if (existsAfter === false) { log('member removed: ' + email); return { ok: true, removed: true, email, removeApi: netLog.slice(-10) }; }
+    if (existsAfter === false) { log('member removed: ' + email); return { ok: true, removed: true, email, removeApi: netLog.slice(-10), batchBody }; }
     await shot(page, 'remove-failed');
-    return { ok: false, removed: false, email, message: 'Remove did not take effect', debug: { typed, selected, del }, net: netLog.slice(-12) };
+    return { ok: false, removed: false, email, message: 'Remove did not take effect', debug: { typed, selected, del }, net: netLog.slice(-12), batchBody };
   } catch (e) { log('removeMember error', e.message); return { ok: false, message: e.message, net: netLog }; }
   finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
