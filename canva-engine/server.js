@@ -58,6 +58,7 @@ async function initDb() {
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS proxy text`);
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS code text`);
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS code_at timestamptz`);
+  await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS code_expires_at timestamptz`);  // real rotation time read from Canva's dialog
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS admin_token text`);
   await db.query(`INSERT INTO canva_account (id, state) VALUES (1, 'none') ON CONFLICT (id) DO NOTHING`);
   await db.query(`UPDATE canva_account SET admin_token=$1 WHERE id=1 AND (admin_token IS NULL OR admin_token='')`, [require('crypto').randomBytes(24).toString('hex')]);
@@ -531,7 +532,7 @@ async function invite(customerEmail) {
 // ─── invite CODE (join-code delivery; NOT reCAPTCHA-gated — only opening the dialog + reading) ───
 const JOIN_LINK = 'https://www.canva.com/class/join';
 let LAST_CONTROLS = [];  // last invite-dialog buttons seen (diagnostics for the regenerate control)
-async function setCode(code) { await db.query('UPDATE canva_account SET code=$1, code_at=NOW(), updated_at=NOW() WHERE id=1', [code]); }
+async function setCode(code, expiresAt) { await db.query('UPDATE canva_account SET code=$1, code_at=NOW(), code_expires_at=$2, updated_at=NOW() WHERE id=1', [code, expiresAt || null]); }
 async function readCode(page, ms) {
   const deadline = Date.now() + ms;
   while (Date.now() < deadline) {
@@ -581,7 +582,10 @@ async function fetchCode(regen) {
     if (regen) { try { LAST_CONTROLS.net = regenNet.slice(-14); } catch (e) {} }
     if (!code) code = await readCode(page, 15000);
     if (!code) { await shot(page, 'code-notfound'); return { ok: false, message: 'Code not found in dialog' }; }
-    await setCode(code);
+    // read Canva's real rotation time ("…will automatically refresh in N minutes/hours") instead of guessing
+    let realExpiry = null;
+    try { const txt = await page.evaluate(() => { const d = document.querySelector('[role=dialog],[aria-modal=true]'); return (d ? d.innerText : document.body.innerText) || ''; }); const m = txt.match(/refresh(?:es)?\s+in\s+(\d+)\s*(hour|hr|minute|min)/i); if (m) { const n = parseInt(m[1], 10); realExpiry = new Date(Date.now() + n * (/^h/i.test(m[2]) ? 3600000 : 60000)); log('code: real expiry in ' + m[1] + ' ' + m[2]); } } catch (e) {}
+    await setCode(code, realExpiry);
     log('code fetched: ' + code);
     return { ok: true, code, joinLink: JOIN_LINK, cached: false };
   } catch (e) { log('fetchCode error', e.message); return { ok: false, message: e.message }; }
@@ -591,13 +595,14 @@ async function fetchCode(regen) {
 const CODE_TTL_MS = 4 * 3600 * 1000;
 async function getCode(forceFresh) {
   const a = await getAccount();
-  const ageMs = a.code_at ? (Date.now() - new Date(a.code_at).getTime()) : Infinity;
-  if (forceFresh || !a.code || ageMs >= 3.5 * 3600 * 1000) { let f; try { f = await fetchCode(forceFresh); } catch (e) { f = { ok: false, message: e.message }; } if (!f.ok && !a.code) return f; }
+  const expMs = a.code_expires_at ? new Date(a.code_expires_at).getTime() : (a.code_at ? new Date(a.code_at).getTime() + CODE_TTL_MS : 0);
+  const stale = !a.code || Date.now() >= (expMs - 60000);   // re-fetch ~1 min before Canva rotates, so we never serve an expired code
+  if (forceFresh || stale) { let f; try { f = await fetchCode(forceFresh); } catch (e) { f = { ok: false, message: e.message }; } if (!f.ok && !a.code) return f; }
   const a2 = await getAccount();
   const codeAt = a2.code_at ? new Date(a2.code_at).getTime() : Date.now();
-  const expiresAt = codeAt + CODE_TTL_MS;
-  const validForMin = Math.max(0, Math.round((expiresAt - Date.now()) / 60000));
-  return { ok: true, code: a2.code, joinLink: JOIN_LINK, fetchedAt: new Date(codeAt).toISOString(), expiresAt: new Date(expiresAt).toISOString(), validForMin, controls: LAST_CONTROLS };
+  const expiresMs = a2.code_expires_at ? new Date(a2.code_expires_at).getTime() : (codeAt + CODE_TTL_MS);
+  const validForMin = Math.max(0, Math.round((expiresMs - Date.now()) / 60000));
+  return { ok: true, code: a2.code, joinLink: JOIN_LINK, fetchedAt: new Date(codeAt).toISOString(), expiresAt: new Date(expiresMs).toISOString(), validForMin, controls: LAST_CONTROLS };
 }
 
 // ─── members read (full People list via search_brand_members, paginated by continuation) ───
