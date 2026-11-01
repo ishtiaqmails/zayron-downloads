@@ -485,12 +485,17 @@ async function fetchCode() {
   } catch (e) { log('fetchCode error', e.message); return { ok: false, message: e.message }; }
   finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
-// Return cached code if fresh (< 3.5h; Canva rotates every 4h), else fetch a new one.
+// Return cached code if fresh (< 3.5h; Canva rotates every 4h), else fetch a new one. Always includes expiry.
+const CODE_TTL_MS = 4 * 3600 * 1000;
 async function getCode(forceFresh) {
   const a = await getAccount();
   const ageMs = a.code_at ? (Date.now() - new Date(a.code_at).getTime()) : Infinity;
-  if (!forceFresh && a.code && ageMs < 3.5 * 3600 * 1000) return { ok: true, code: a.code, joinLink: JOIN_LINK, cached: true, ageMin: Math.round(ageMs / 60000) };
-  return await fetchCode();
+  if (forceFresh || !a.code || ageMs >= 3.5 * 3600 * 1000) { const f = await fetchCode(); if (!f.ok) return f; }
+  const a2 = await getAccount();
+  const codeAt = a2.code_at ? new Date(a2.code_at).getTime() : Date.now();
+  const expiresAt = codeAt + CODE_TTL_MS;
+  const validForMin = Math.max(0, Math.round((expiresAt - Date.now()) / 60000));
+  return { ok: true, code: a2.code, joinLink: JOIN_LINK, fetchedAt: new Date(codeAt).toISOString(), expiresAt: new Date(expiresAt).toISOString(), validForMin };
 }
 
 // ─── members read (full People list via search_brand_members, paginated by continuation) ───
@@ -534,6 +539,55 @@ async function reconcile() {
   return { ok: true, total: mem.count, protectedNonMembers: mem.count - onlyMembers.length, authorizedEmails: allow.size, keep: mem.count - candidates.length, removeCandidates: candidates.map(c => ({ email: c.email, name: c.name, id: c.id })), mode: 'report-only' };
 }
 
+// ─── remove a member (search -> select -> trash -> confirm; captures the remove API) ───
+async function removeMember(email) {
+  email = normEmail(email);
+  if (!email) return { ok: false, message: 'email required' };
+  const acct = await getAccount();
+  if (acct.state !== 'active' || !acct.storage_state) return { ok: false, message: 'No active Canva session' };
+  await lock();
+  const browser = await launch();
+  const netLog = [];
+  try {
+    const page = await newPage(browser);
+    page.on('response', async (res) => { try { const m = res.request().method(); const u = res.url(); if (m !== 'GET' && /\/_ajax\//.test(u) && /member|brand|remove|delete|revoke|membership/i.test(u)) netLog.push(m + ' ' + res.status() + ' ' + u.replace('https://www.canva.com', '').split('?')[0]); } catch (e) {} });
+    await restoreStorage(page, acct.storage_state);
+    if (!await isLoggedIn(page)) { await setState('needs_relogin'); return { ok: false, result: 'needs_relogin', message: 'Session expired' }; }
+    await page.goto('https://www.canva.com/settings/people', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+    await sleep(8000);
+    // confirm the member exists first
+    const existsBefore = await page.evaluate(async (email) => { try { const r = await fetch('/_ajax/profilesearch/search_brand_members?searchEmail=' + encodeURIComponent(email) + '&projection=C&limit=10', { credentials: 'include' }); let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); const j = JSON.parse(t); return (j.results || []).some(m => m.C && String(m.C.email || '').toLowerCase() === email); } catch (e) { return null; } }, email);
+    if (existsBefore === false) return { ok: false, result: 'not_found', message: 'Member not in team: ' + email };
+    // type email into the People search box
+    const typed = await page.evaluate(() => { const i = [...document.querySelectorAll('input')].find(x => /search members/i.test((x.getAttribute('placeholder') || '') + (x.getAttribute('aria-label') || ''))); if (i) { i.focus(); return true; } return false; });
+    if (typed) { await page.keyboard.type(email, { delay: 45 }); }
+    await sleep(4500);
+    // select the first data-row checkbox (skip the header select-all at the very top)
+    const selected = await page.evaluate(() => {
+      const cbs = [...document.querySelectorAll('input[type=checkbox],[role=checkbox]')].filter(c => { const r = c.getBoundingClientRect(); return r.width > 0 && r.height > 0 && r.top > 300; });
+      if (cbs.length) { cbs[0].click(); return true; }
+      return false;
+    });
+    await sleep(1800);
+    // click the trash/delete button in the floating bulk-action bar (it's the last icon)
+    const del = await page.evaluate(() => {
+      let bar = [...document.querySelectorAll('div,section,footer')].find(e => /\bselected\b/i.test(e.innerText || '') && e.getBoundingClientRect().top > 480 && e.querySelectorAll('button,[role=button]').length >= 2);
+      let btns = (bar ? [...bar.querySelectorAll('button,[role=button]')] : [...document.querySelectorAll('button,[role=button]')].filter(b => b.getBoundingClientRect().top > 540)).filter(b => { const r = b.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+      if (!btns.length) return 'no-bar';
+      btns[btns.length - 1].click();
+      return 'clicked-last-of-' + btns.length;
+    });
+    await sleep(2500);
+    await clickByText(page, ['remove from team', 'remove', 'delete', 'confirm', 'yes']);
+    await sleep(3500);
+    const existsAfter = await page.evaluate(async (email) => { try { const r = await fetch('/_ajax/profilesearch/search_brand_members?searchEmail=' + encodeURIComponent(email) + '&projection=C&limit=10', { credentials: 'include' }); let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); const j = JSON.parse(t); return (j.results || []).some(m => m.C && String(m.C.email || '').toLowerCase() === email); } catch (e) { return null; } }, email);
+    if (existsAfter === false) { log('member removed: ' + email); return { ok: true, removed: true, email, removeApi: netLog.slice(-10) }; }
+    await shot(page, 'remove-failed');
+    return { ok: false, removed: false, email, message: 'Remove did not take effect', debug: { typed, selected, del }, net: netLog.slice(-12) };
+  } catch (e) { log('removeMember error', e.message); return { ok: false, message: e.message, net: netLog }; }
+  finally { try { await browser.close(); } catch (e) {} unlock(); }
+}
+
 // ─── heartbeat (skips if a browser op is in progress) ───
 async function heartbeat() {
   const acct = await getAccount();
@@ -565,6 +619,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/allow') { try { return send(res, 200, { ok: true, allow: await listAllow() }); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && req.url === '/allow') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); const okk = await addAllow(b.email, b.source || 'manual', b.order_ref || null, b.note || null); return send(res, 200, { ok: okk, email: normEmail(b.email) }); }
     if (req.method === 'POST' && req.url === '/allow/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); await removeAllow(b.email); return send(res, 200, { ok: true, removed: normEmail(b.email) }); }
+    if (req.method === 'POST' && req.url === '/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); try { return send(res, 200, await removeMember(b.email)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && req.url === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
     if (req.method === 'POST' && req.url === '/session/clear') { try { return send(res, 200, await sessionClear()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && req.url === '/login/start') { const b = await readBody(req); if (!b.email) return send(res, 400, { state: 'error', message: 'email required' }); try { return send(res, 200, await loginStart(String(b.email).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }
