@@ -314,16 +314,21 @@ async function clickExactTrusted(page, rxSource, maxLen) {
   return true;
 }
 async function openInviteDialog(page) {
-  if (await waitForButton(page, 'invite students', 40, 45000)) {
+  const btn = await waitForButton(page, 'invite students', 40, 45000);
+  log('inv: invite-students button present=' + btn);
+  if (btn) {
     await humanPause();
-    await clickExactTrusted(page, 'invite students', 40);
+    const c = await clickExactTrusted(page, 'invite students', 40);
+    log('inv: clicked invite-students=' + c);
   } else { // fallback path: avatar -> Teams -> team -> Invite people
     await clickByText(page, [''], { sel: '[aria-label*=Account i],[aria-label*=profile i],header img,nav img' }).catch(() => {});
     await sleep(900);
     await clickByText(page, ['teams', 'team']); await sleep(900);
     await clickByText(page, ['invite people', 'invite members', 'invite students']); await sleep(1200);
   }
-  return await waitInviteField(page, 20000);
+  const field = await waitInviteField(page, 20000);
+  log('inv: email field present=' + field);
+  return field;
 }
 async function waitInviteField(page, ms) {
   const deadline = Date.now() + ms;
@@ -359,23 +364,32 @@ async function invite(customerEmail) {
   const browser = await launch();
   let onResp = null;
   try {
+    const t0 = Date.now(); const dt = () => Math.round((Date.now() - t0) / 1000) + 's';
     const page = await newPage(browser);
     await restoreStorage(page, acct.storage_state);
+    log('inv[' + dt() + ']: restored, url=' + page.url());
     if (!await isLoggedIn(page)) { await shot(page, 'invite-loggedout'); await setState('needs_relogin'); return { ok: false, result: 'needs_relogin', message: 'Session expired — re-import needed' }; }
+    log('inv[' + dt() + ']: logged in OK');
     try { if (await alreadyInvited(page, brand, target)) { log('already invited', target); return { ok: true, result: 'already_invited', message: 'Already invited: ' + customerEmail }; } } catch (e) {}
+    log('inv[' + dt() + ']: dup-check done');
     let createOk = false, createBody = null, createSeen = false, assessInfo = null; const netLog = [];
     onResp = async (res) => { try { const u = res.url(); if (/_ajax|recaptcha|risk|assess|invitation/i.test(u)) netLog.push(res.status() + ' ' + res.request().method() + ' ' + u.replace('https://www.canva.com', '').split('?')[0]); if (/invitations\/create/.test(u)) { createSeen = true; const t = await res.text(); createBody = t; if (res.status() >= 200 && res.status() < 300 && t && t.toLowerCase().includes(target)) createOk = true; } else if (/requestriskscoring\/assess/.test(u)) { const t = await res.text().catch(() => ''); assessInfo = { status: res.status(), body: String(t || '').slice(0, 200) }; } } catch (e) {} };
     page.on('response', onResp);
     if (!await openInviteDialog(page)) { await shot(page, 'invite-nodialog'); const dbg = await page.evaluate(() => ({ url: location.href, title: document.title, buttons: [...new Set([...document.querySelectorAll('button,[role=button]')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).map(e => (e.innerText || '').replace(/\s+/g, ' ').trim()).filter(t => t && t.length < 40))].slice(0, 30) })).catch(() => null); return { ok: false, result: 'error', message: 'Could not open the invite dialog (button or email field not found)', detail: dbg }; }
+    log('inv[' + dt() + ']: dialog opened');
     if (!await typeEmail(page, customerEmail.trim())) { await shot(page, 'invite-nofield'); return { ok: false, result: 'error', message: 'Email field not found' }; }
+    log('inv[' + dt() + ']: email typed');
     await sleep(1200);
-    if (!await clickSend(page, 8000)) { await shot(page, 'invite-nosend'); return { ok: false, result: 'error', message: 'Send invitations button did not appear (email invalid?)' }; }
-    const deadline = Date.now() + 12000; let live = false;
+    const sent = await clickSend(page, 15000);
+    log('inv[' + dt() + ']: send clicked=' + sent);
+    if (!sent) { await shot(page, 'invite-nosend'); return { ok: false, result: 'error', message: 'Send invitations button did not appear (email invalid?)' }; }
+    const deadline = Date.now() + 15000; let live = false;
     while (Date.now() < deadline && !createOk) {
       const hit = await page.evaluate(() => [...document.querySelectorAll('[aria-live],[role=status],[role=alert]')].map(n => (n.innerText || n.textContent || '')).join(' | ').toLowerCase());
       if (hit.includes('invitation sent') && hit.includes(target)) { live = true; break; }
       await sleep(400);
     }
+    log('inv[' + dt() + ']: createOk=' + createOk + ' live=' + live + ' createSeen=' + createSeen + ' net=' + JSON.stringify(netLog.slice(-12)));
     if (createOk || live) { log('invite sent', target, createOk ? '(create 200)' : '(aria-live)'); return { ok: true, result: 'sent', message: 'Invitation sent to ' + customerEmail }; }
     await shot(page, 'invite-nosignal');
     if (!createSeen) return { ok: false, result: 'blocked', message: 'No create request fired — Canva risk gate (assess) did not clear.', detail: { assess: assessInfo, net: netLog.slice(-18), egress: PROXY_CFG ? PROXY_CFG.server : 'direct' } };
