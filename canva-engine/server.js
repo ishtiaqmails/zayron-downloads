@@ -56,6 +56,8 @@ async function initDb() {
   )`);
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS brand text`);
   await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS proxy text`);
+  await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS code text`);
+  await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS code_at timestamptz`);
   await db.query(`INSERT INTO canva_account (id, state) VALUES (1, 'none') ON CONFLICT (id) DO NOTHING`);
 }
 async function getAccount() { const r = await db.query('SELECT * FROM canva_account WHERE id=1'); return r.rows[0] || { state: 'none' }; }
@@ -421,6 +423,48 @@ async function invite(customerEmail) {
   finally { try { if (onResp) page.off && page.off('response', onResp); } catch (e) {} try { await browser.close(); } catch (e) {} unlock(); }
 }
 
+// ─── invite CODE (join-code delivery; NOT reCAPTCHA-gated — only opening the dialog + reading) ───
+const JOIN_LINK = 'https://www.canva.com/class/join';
+async function setCode(code) { await db.query('UPDATE canva_account SET code=$1, code_at=NOW(), updated_at=NOW() WHERE id=1', [code]); }
+async function readCode(page, ms) {
+  const deadline = Date.now() + ms;
+  while (Date.now() < deadline) {
+    const txt = await page.evaluate(() => { const d = [...document.querySelectorAll('[role=dialog],[aria-modal=true]')].map(x => x.innerText || '').join(' '); return d || (document.body ? document.body.innerText : '') || ''; }).catch(() => '');
+    const m = txt.match(/\b([A-Z0-9]{3})\s*-\s*([A-Z0-9]{3})\s*-\s*([A-Z0-9]{3})\b/);
+    if (m) return (m[1] + '-' + m[2] + '-' + m[3]).toUpperCase();
+    await sleep(800);
+  }
+  return null;
+}
+async function fetchCode() {
+  const acct = await getAccount();
+  if (acct.state !== 'active' || !acct.storage_state) return { ok: false, message: 'No active Canva session' };
+  await lock();
+  const browser = await launch();
+  try {
+    const page = await newPage(browser);
+    await restoreStorage(page, acct.storage_state);
+    if (!await isLoggedIn(page)) { await setState('needs_relogin'); return { ok: false, result: 'needs_relogin', message: 'Session expired — re-import needed' }; }
+    if (!await openInviteDialog(page)) { await shot(page, 'code-nodialog'); return { ok: false, message: 'Could not open invite dialog' }; }
+    let toCode = await clickDirect(page, 'via code', 20);
+    if (!toCode) toCode = await clickByText(page, ['via code']);
+    log('code: clicked via-code=' + toCode);
+    const code = await readCode(page, 15000);
+    if (!code) { await shot(page, 'code-notfound'); return { ok: false, message: 'Code not found in dialog' }; }
+    await setCode(code);
+    log('code fetched: ' + code);
+    return { ok: true, code, joinLink: JOIN_LINK, cached: false };
+  } catch (e) { log('fetchCode error', e.message); return { ok: false, message: e.message }; }
+  finally { try { await browser.close(); } catch (e) {} unlock(); }
+}
+// Return cached code if fresh (< 3.5h; Canva rotates every 4h), else fetch a new one.
+async function getCode(forceFresh) {
+  const a = await getAccount();
+  const ageMs = a.code_at ? (Date.now() - new Date(a.code_at).getTime()) : Infinity;
+  if (!forceFresh && a.code && ageMs < 3.5 * 3600 * 1000) return { ok: true, code: a.code, joinLink: JOIN_LINK, cached: true, ageMin: Math.round(ageMs / 60000) };
+  return await fetchCode();
+}
+
 // ─── heartbeat (skips if a browser op is in progress) ───
 async function heartbeat() {
   const acct = await getAccount();
@@ -446,6 +490,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/status') { const a = await getAccount(); return send(res, 200, { email: a.email || null, state: a.state, brand: (a && a.brand) || DEFAULT_BRAND, proxy: (a && a.proxy) ? 'set' : (process.env.CANVA_PROXY ? 'env' : null), stealth: STEALTH, lastHeartbeat: a.last_heartbeat || null }); }
     if (req.method === 'POST' && req.url === '/config') { const b = await readBody(req); if (!('brand' in b) && !('proxy' in b)) return send(res, 400, { ok: false, message: 'brand and/or proxy required' }); const extra = {}; if ('brand' in b) extra.brand = String(b.brand).trim(); if ('proxy' in b) extra.proxy = String(b.proxy).trim(); await setState((await getAccount()).state || 'none', extra); const a = await getAccount(); return send(res, 200, { ok: true, brand: a.brand || DEFAULT_BRAND, proxy: a.proxy ? 'set' : null }); }
     if (req.method === 'POST' && req.url === '/proxytest') { try { return send(res, 200, await proxyTest()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && (req.url === '/code' || req.url === '/code/refresh')) { try { return send(res, 200, await getCode(req.url.endsWith('refresh'))); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && req.url === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
     if (req.method === 'POST' && req.url === '/session/clear') { try { return send(res, 200, await sessionClear()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && req.url === '/login/start') { const b = await readBody(req); if (!b.email) return send(res, 400, { state: 'error', message: 'email required' }); try { return send(res, 200, await loginStart(String(b.email).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }
