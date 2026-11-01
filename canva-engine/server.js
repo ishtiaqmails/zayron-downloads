@@ -465,6 +465,31 @@ async function getCode(forceFresh) {
   return await fetchCode();
 }
 
+// ─── members read (People list via the brand members API; not reCAPTCHA-gated) ───
+async function fetchMembersRaw() {
+  const acct = await getAccount();
+  if (acct.state !== 'active' || !acct.storage_state) return { ok: false, message: 'No active Canva session' };
+  const brand = await getBrand();
+  await lock();
+  const browser = await launch();
+  try {
+    const page = await newPage(browser);
+    await restoreStorage(page, acct.storage_state);
+    if (!await isLoggedIn(page)) { await setState('needs_relogin'); return { ok: false, result: 'needs_relogin', message: 'Session expired — re-import needed' }; }
+    const data = await page.evaluate(async (brand) => {
+      try {
+        const u = '/_ajax/profile/v2/brands/' + encodeURIComponent(brand) + '/members?limit=100';
+        const r = await fetch(u, { headers: { accept: 'application/json' }, credentials: 'include' });
+        const j = await r.json();
+        const arr = Array.isArray(j.A) ? j.A : (Array.isArray(j) ? j : (Object.values(j).find(v => Array.isArray(v)) || []));
+        return { status: r.status, topKeys: Object.keys(j), count: arr.length, sample: JSON.stringify(arr.slice(0, 2)).slice(0, 1200) };
+      } catch (e) { return { error: String(e) }; }
+    }, brand);
+    return { ok: true, data };
+  } catch (e) { log('fetchMembersRaw error', e.message); return { ok: false, message: e.message }; }
+  finally { try { await browser.close(); } catch (e) {} unlock(); }
+}
+
 // ─── heartbeat (skips if a browser op is in progress) ───
 async function heartbeat() {
   const acct = await getAccount();
@@ -491,6 +516,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && req.url === '/config') { const b = await readBody(req); if (!('brand' in b) && !('proxy' in b)) return send(res, 400, { ok: false, message: 'brand and/or proxy required' }); const extra = {}; if ('brand' in b) extra.brand = String(b.brand).trim(); if ('proxy' in b) extra.proxy = String(b.proxy).trim(); await setState((await getAccount()).state || 'none', extra); const a = await getAccount(); return send(res, 200, { ok: true, brand: a.brand || DEFAULT_BRAND, proxy: a.proxy ? 'set' : null }); }
     if (req.method === 'POST' && req.url === '/proxytest') { try { return send(res, 200, await proxyTest()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && (req.url === '/code' || req.url === '/code/refresh')) { try { return send(res, 200, await getCode(req.url.endsWith('refresh'))); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && req.url === '/members/raw') { try { return send(res, 200, await fetchMembersRaw()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && req.url === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
     if (req.method === 'POST' && req.url === '/session/clear') { try { return send(res, 200, await sessionClear()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && req.url === '/login/start') { const b = await readBody(req); if (!b.email) return send(res, 400, { state: 'error', message: 'email required' }); try { return send(res, 200, await loginStart(String(b.email).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }
