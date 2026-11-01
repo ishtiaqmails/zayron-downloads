@@ -76,6 +76,18 @@ async function initDb() {
     queued_at timestamptz NOT NULL DEFAULT NOW(),
     done_at timestamptz
   )`);
+  // proxy bandwidth tracking (IPRoyal residential quota)
+  await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS proxy_bytes bigint NOT NULL DEFAULT 0`);
+  await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS proxy_since timestamptz`);
+  await db.query(`ALTER TABLE canva_account ADD COLUMN IF NOT EXISTS proxy_quota_mb int NOT NULL DEFAULT 2048`);
+  await db.query(`CREATE TABLE IF NOT EXISTS canva_proxy_log (
+    id serial PRIMARY KEY,
+    op text,
+    at timestamptz NOT NULL DEFAULT NOW(),
+    ms int,
+    bytes bigint,
+    egress text
+  )`);
 }
 async function getAccount() { const r = await db.query('SELECT * FROM canva_account WHERE id=1'); return r.rows[0] || { state: 'none' }; }
 async function getBrand() { if (process.env.CANVA_BRAND) return process.env.CANVA_BRAND; const a = await getAccount(); return (a && a.brand) || DEFAULT_BRAND; }
@@ -107,7 +119,28 @@ async function setState(state, extra) {
 // ─── single-browser lock (persistent profile cannot be opened twice at once) ───
 let LOCK = false;
 async function lock(timeoutMs) { const d = Date.now() + (timeoutMs || 120000); while (LOCK) { if (Date.now() > d) throw new Error('engine busy'); await sleep(300); } LOCK = true; }
-function unlock() { LOCK = false; }
+function unlock() { LOCK = false; const b = PENDING_BYTES; PENDING_BYTES = 0; const op = CURRENT_OP, ms = Date.now() - OP_T0; CURRENT_OP = 'engine'; if (b > 0) flushUsage(op, b, ms).catch(() => {}); }
+
+// ─── proxy bandwidth accounting (every op runs under the lock, so bytes attribute to CURRENT_OP) ───
+let PENDING_BYTES = 0, CURRENT_OP = 'engine', OP_T0 = Date.now(), LAST_EGRESS = null;
+function markOp(op) { CURRENT_OP = op; OP_T0 = Date.now(); }  // call right after lock()
+async function flushUsage(op, bytes, ms) {
+  try {
+    await db.query('UPDATE canva_account SET proxy_bytes = COALESCE(proxy_bytes,0) + $1, proxy_since = COALESCE(proxy_since, NOW()) WHERE id=1', [bytes]);
+    await db.query('INSERT INTO canva_proxy_log(op, ms, bytes, egress) VALUES($1,$2,$3,$4)', [op, ms, bytes, LAST_EGRESS]);
+    await db.query('DELETE FROM canva_proxy_log WHERE id < (SELECT COALESCE(MAX(id),0) - 300 FROM canva_proxy_log)');
+  } catch (e) { log('flushUsage', e.message); }
+}
+async function proxyMonitor() {
+  const a = await getAccount();
+  const used = Number(a.proxy_bytes || 0), quotaMb = a.proxy_quota_mb || 2048, usedMb = used / 1048576;
+  const rows = (await db.query('SELECT op, at, ms, bytes FROM canva_proxy_log ORDER BY id DESC LIMIT 60')).rows;
+  let perDayMb = null, daysLeft = null;
+  if (a.proxy_since) { const days = Math.max(0.05, (Date.now() - new Date(a.proxy_since).getTime()) / 86400000); const perDay = used / days; perDayMb = +(perDay / 1048576).toFixed(2); const remain = quotaMb * 1048576 - used; daysLeft = perDay > 0 ? +(remain / perDay).toFixed(1) : null; }
+  return { ok: true, proxy: PROXY_CFG ? PROXY_CFG.server : null, egress: LAST_EGRESS, sessionLifetimeMin: 30, usedMb: +usedMb.toFixed(2), quotaMb, remainingMb: +(quotaMb - usedMb).toFixed(2), pct: +Math.min(100, quotaMb ? usedMb / quotaMb * 100 : 0).toFixed(1), since: a.proxy_since, perDayMb, daysLeft, log: rows };
+}
+async function proxySetQuota(mb) { mb = parseInt(mb, 10); if (!mb || mb < 1) return { ok: false, message: 'quota (MB) required' }; await db.query('UPDATE canva_account SET proxy_quota_mb=$1 WHERE id=1', [mb]); return { ok: true, quotaMb: mb }; }
+async function proxyResetUsage() { await db.query('UPDATE canva_account SET proxy_bytes=0, proxy_since=NOW() WHERE id=1'); return { ok: true }; }
 
 // ─── puppeteer helpers ───
 async function launch() { await loadProxy(); const args = PROXY_CFG ? ARGS.concat('--proxy-server=' + PROXY_CFG.server) : ARGS; return puppeteer.launch({ headless: false, userDataDir: PROFILE, args, defaultViewport: null, ignoreDefaultArgs: ['--enable-automation'] }); }
@@ -119,17 +152,21 @@ async function newPage(browser) {
   await page.setUserAgent(UA);
   await page.setViewport({ width: 1366, height: 900 });
   await blockHeavy(page);
+  // count real bytes-over-the-wire through the proxy (compressed transfer size)
+  try { const cdp = await page.target().createCDPSession(); await cdp.send('Network.enable'); cdp.on('Network.loadingFinished', e => { PENDING_BYTES += (e.encodedDataLength || 0); }); } catch (e) { log('cdp bytes warn', e.message); }
   return page;
 }
 async function proxyTest() {
   await lock();
+  markOp('proxy test');
   const browser = await launch();
   try {
     const page = await newPage(browser);
     await page.goto('https://api.ipify.org?format=json', { waitUntil: 'domcontentloaded', timeout: 30000 });
     const body = await page.evaluate(() => document.body ? document.body.innerText : '');
     let ip = body; try { ip = (JSON.parse(body).ip) || body; } catch (e) {}
-    return { ok: true, egressIp: String(ip).trim(), proxy: PROXY_CFG ? PROXY_CFG.server : null };
+    LAST_EGRESS = String(ip).trim();
+    return { ok: true, egressIp: LAST_EGRESS, proxy: PROXY_CFG ? PROXY_CFG.server : null };
   } catch (e) { return { ok: false, message: e.message, proxy: PROXY_CFG ? PROXY_CFG.server : null }; }
   finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
@@ -241,6 +278,7 @@ async function sessionImport(body) {
   let ss = body.sessionStorage; if (typeof ss === 'string') { try { ss = JSON.parse(ss); } catch (e) { ss = {}; } }
   const storage = { cookies: norm, localStorage: ls || {}, sessionStorage: ss || {}, savedAt: Date.now() };
   await lock();
+  markOp('session import');
   const browser = await launch();
   try {
     const page = await newPage(browser);
@@ -264,6 +302,7 @@ async function sessionClear() { await setState('none', { email: null, storage: n
 let loginSession = null;
 async function loginStart(email) {
   await lock(5 * 60 * 1000);
+  markOp('login');
   if (loginSession) { try { await loginSession.browser.close(); } catch (e) {} loginSession = null; }
   try {
     const browser = await launch();
@@ -419,6 +458,7 @@ async function invite(customerEmail) {
   const brand = await getBrand();
   const target = String(customerEmail).trim().toLowerCase();
   await lock();
+  markOp('invite');
   const browser = await launch();
   let onResp = null;
   try {
@@ -480,6 +520,7 @@ async function fetchCode() {
   const acct = await getAccount();
   if (acct.state !== 'active' || !acct.storage_state) return { ok: false, message: 'No active Canva session' };
   await lock();
+  markOp('code');
   const browser = await launch();
   try {
     const page = await newPage(browser);
@@ -515,6 +556,7 @@ async function fetchMembers() {
   const acct = await getAccount();
   if (acct.state !== 'active' || !acct.storage_state) return { ok: false, message: 'No active Canva session' };
   await lock();
+  markOp('members');
   const browser = await launch();
   try {
     const page = await newPage(browser);
@@ -558,6 +600,7 @@ async function removeMember(email) {
   const acct = await getAccount();
   if (acct.state !== 'active' || !acct.storage_state) return { ok: false, message: 'No active Canva session' };
   await lock();
+  markOp('remove');
   const browser = await launch();
   const netLog = []; let batchBody = null;
   try {
@@ -646,6 +689,7 @@ async function reverify() {
   const acct = await getAccount();
   if (!acct.storage_state) return { ok: false, message: 'No stored session — import needed' };
   await lock();
+  markOp('reverify');
   const browser = await launch();
   try {
     const page = await newPage(browser);
@@ -662,6 +706,7 @@ async function heartbeat() {
   if (acct.state !== 'active' || !acct.storage_state) return;
   if (LOCK) { log('hb skip (busy)'); return; }
   await lock();
+  markOp('heartbeat');
   const browser = await launch();
   try {
     const page = await newPage(browser);
@@ -804,6 +849,9 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'POST' && path === '/remove') { const b = await readBody(req); if (!b.email) return send(res, 400, { ok: false, message: 'email required' }); try { return send(res, 200, await removeMember(b.email)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/remove/batch') { const b = await readBody(req); try { return send(res, 200, await queueRemovals(b.emails || [])); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && path === '/remove/status') { try { return send(res, 200, await removeQueueStatus()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && path === '/proxy/monitor') { try { return send(res, 200, await proxyMonitor()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'POST' && path === '/proxy/quota') { const b = await readBody(req); try { return send(res, 200, await proxySetQuota(b.quotaMb)); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'POST' && path === '/proxy/reset') { try { return send(res, 200, await proxyResetUsage()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/session/import') { const b = await readBody(req); try { return send(res, 200, await sessionImport(b)); } catch (e) { return send(res, 200, { ok: false, state: 'error', message: e.message }); } }
     if (req.method === 'POST' && path === '/session/clear') { try { return send(res, 200, await sessionClear()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'POST' && path === '/login/start') { const b = await readBody(req); if (!b.email) return send(res, 400, { state: 'error', message: 'email required' }); try { return send(res, 200, await loginStart(String(b.email).trim())); } catch (e) { return send(res, 200, { state: 'error', message: e.message }); } }

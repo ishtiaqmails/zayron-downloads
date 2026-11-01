@@ -41,7 +41,14 @@ table.cv-tbl td{padding:10px 8px;border-bottom:1px solid #f4f5f9;vertical-align:
 .cv-search{max-width:240px;}
 .cv-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#1e1b4b;color:#fff;padding:11px 18px;border-radius:11px;font-size:13px;font-weight:600;opacity:0;transition:.2s;pointer-events:none;z-index:9999;box-shadow:0 8px 24px rgba(30,27,75,.3);}
 .cv-toast.show{opacity:1;}
-@media(max-width:560px){.cv-code{font-size:28px;}.cv-field{grid-template-columns:1fr;}}
+.cv-prox-top{display:grid;grid-template-columns:auto 1fr auto;gap:18px;align-items:center;}
+.cv-prox-big{font-size:26px;font-weight:900;color:#1e1b4b;line-height:1;}
+.cv-prox-k{font-size:11px;color:#9ca3af;text-transform:uppercase;letter-spacing:.05em;font-weight:700;margin-top:3px;}
+.cv-prox-bar-wrap{height:12px;background:#eef0f7;border-radius:8px;overflow:hidden;}
+.cv-prox-bar{height:100%;width:0;background:linear-gradient(90deg,#10b981,#6366f1);transition:width .4s;}
+.cv-prox-bar.warn{background:linear-gradient(90deg,#f59e0b,#ef4444);}
+.cv-prox-meta{font-size:12px;color:#6b7280;margin-top:10px;}
+@media(max-width:560px){.cv-code{font-size:28px;}.cv-field{grid-template-columns:1fr;}.cv-prox-top{grid-template-columns:1fr;gap:10px;}}
 </style>
 
 <div class="cv-summary">
@@ -49,6 +56,25 @@ table.cv-tbl td{padding:10px 8px;border-bottom:1px solid #f4f5f9;vertical-align:
   <div class="cv-stat"><div class="sv" id="cv-s-code" style="font-family:ui-monospace,monospace;font-size:19px;">…</div><div class="sk">Live join code</div></div>
   <div class="cv-stat"><div class="sv" id="cv-s-members">—</div><div class="sk">In the team</div></div>
   <div class="cv-stat"><div class="sv" id="cv-s-unknown">—</div><div class="sk">Not on your list</div></div>
+</div>
+
+<div class="cv-card">
+  <div class="cv-card-head"><h3>🌐 Proxy monitor <span class="hint">IPRoyal residential bandwidth</span></h3><button class="cv-btn ghost sm" onclick="cvProxyTest(this)">Test connection</button></div>
+  <div class="cv-card-body">
+    <div class="cv-prox-top">
+      <div><div class="cv-prox-big" id="cv-px-remain">—</div><div class="cv-prox-k">GB remaining</div></div>
+      <div class="cv-prox-bar-wrap"><div class="cv-prox-bar" id="cv-px-bar"></div></div>
+      <div style="text-align:right;"><div class="cv-prox-big" id="cv-px-days">—</div><div class="cv-prox-k">days left · at current rate</div></div>
+    </div>
+    <div class="cv-prox-meta" id="cv-px-meta"></div>
+    <div class="cv-row" style="margin-top:12px;gap:8px;">
+      <span class="cv-note" style="margin:0;">Quota (MB):</span>
+      <input class="cv-inp" id="cv-px-quota" style="max-width:120px;" placeholder="2048">
+      <button class="cv-btn ghost sm" onclick="cvSetQuota()">Save quota</button>
+      <button class="cv-btn ghost sm" onclick="cvResetUsage()">Reset after top-up</button>
+    </div>
+    <table class="cv-tbl" style="margin-top:14px;"><thead><tr><th>Activity</th><th>When</th><th>Took</th><th>Data</th></tr></thead><tbody id="cv-px-log"><tr><td class="cv-empty" colspan="4">Loading…</td></tr></tbody></table>
+  </div>
 </div>
 
 <div class="cv-card">

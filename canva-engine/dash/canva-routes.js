@@ -33,4 +33,8 @@ module.exports = function (app, requireAuth) {
   app.post('/canva/api/remove/batch', requireAuth, async (req, res) => pass(res, await engineReq('POST', '/remove/batch', req.body)));
   app.get('/canva/api/remove/status', requireAuth, async (req, res) => pass(res, await engineReq('GET', '/remove/status')));
   app.get('/canva/api/reverify',      requireAuth, async (req, res) => pass(res, await engineReq('GET', '/reverify')));
+  app.get('/canva/api/proxy/monitor', requireAuth, async (req, res) => pass(res, await engineReq('GET', '/proxy/monitor')));
+  app.post('/canva/api/proxy/quota',  requireAuth, async (req, res) => pass(res, await engineReq('POST', '/proxy/quota', req.body)));
+  app.post('/canva/api/proxy/reset',  requireAuth, async (req, res) => pass(res, await engineReq('POST', '/proxy/reset', req.body)));
+  app.post('/canva/api/proxytest',    requireAuth, async (req, res) => pass(res, await engineReq('POST', '/proxytest', {})));
 };
