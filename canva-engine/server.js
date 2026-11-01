@@ -556,7 +556,7 @@ async function removeMember(email) {
     await page.goto('https://www.canva.com/settings/people', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
     await sleep(8000);
     // confirm the member exists first
-    const existsBefore = await page.evaluate(async (email) => { try { const r = await fetch('/_ajax/profilesearch/search_brand_members?searchEmail=' + encodeURIComponent(email) + '&projection=C&limit=10', { credentials: 'include' }); let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); const j = JSON.parse(t); return (j.results || []).some(m => m.C && String(m.C.email || '').toLowerCase() === email); } catch (e) { return null; } }, email);
+    const existsBefore = await page.evaluate(async (email) => { try { const r = await fetch('/_ajax/profilesearch/search_brand_members?searchEmail=' + encodeURIComponent(email) + '&projection=B&projection=C&projection=D&limit=10', { credentials: 'include' }); let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); const j = JSON.parse(t); return (j.results || []).some(m => m.C && String(m.C.email || '').toLowerCase() === email); } catch (e) { return null; } }, email);
     if (existsBefore === false) return { ok: false, result: 'not_found', message: 'Member not in team: ' + email };
     // type email into the People search box
     const typed = await page.evaluate(() => { const i = [...document.querySelectorAll('input')].find(x => /search members/i.test((x.getAttribute('placeholder') || '') + (x.getAttribute('aria-label') || ''))); if (i) { i.focus(); return true; } return false; });
@@ -580,7 +580,7 @@ async function removeMember(email) {
     await sleep(2500);
     await clickByText(page, ['remove from team', 'remove', 'delete', 'confirm', 'yes']);
     await sleep(3500);
-    const existsAfter = await page.evaluate(async (email) => { try { const r = await fetch('/_ajax/profilesearch/search_brand_members?searchEmail=' + encodeURIComponent(email) + '&projection=C&limit=10', { credentials: 'include' }); let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); const j = JSON.parse(t); return (j.results || []).some(m => m.C && String(m.C.email || '').toLowerCase() === email); } catch (e) { return null; } }, email);
+    const existsAfter = await page.evaluate(async (email) => { try { const r = await fetch('/_ajax/profilesearch/search_brand_members?searchEmail=' + encodeURIComponent(email) + '&projection=B&projection=C&projection=D&limit=10', { credentials: 'include' }); let t = await r.text(); const i = t.search(/[\[{]/); if (i > 0) t = t.slice(i); const j = JSON.parse(t); return (j.results || []).some(m => m.C && String(m.C.email || '').toLowerCase() === email); } catch (e) { return null; } }, email);
     if (existsAfter === false) { log('member removed: ' + email); return { ok: true, removed: true, email, removeApi: netLog.slice(-10) }; }
     await shot(page, 'remove-failed');
     return { ok: false, removed: false, email, message: 'Remove did not take effect', debug: { typed, selected, del }, net: netLog.slice(-12) };
