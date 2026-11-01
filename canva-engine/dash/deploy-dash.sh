@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -e
-BASE=https://raw.githubusercontent.com/ishtiaqmails/zayron-downloads/9e955b5ccf57b94b89c9034b750433455726d46f/canva-engine/dash
+BASE=https://raw.githubusercontent.com/ishtiaqmails/zayron-downloads/b1b0aa2f31dbfd0cc1c6462e33fdfca201d10e0c/canva-engine/dash
 TMP=$(mktemp -d)
 for f in canva-routes.js canva.ejs canva.js patch.js; do curl -fsSL "$BASE/$f" -o "$TMP/$f"; done
 node "$TMP/patch.js" "$TMP"
