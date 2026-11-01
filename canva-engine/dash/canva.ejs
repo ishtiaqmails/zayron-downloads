@@ -1,0 +1,115 @@
+<% var title = 'Canva Education · Galaxy Admin'; var heading = 'Canva Education'; %>
+<%- include('partials/header', { title: title, heading: heading, path: path, creditPills: [] }) %>
+<style>
+.cv-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin-bottom:26px;}
+.cv-stat{background:#fff;border:1px solid #e8eaf0;border-radius:16px;padding:18px 20px;display:flex;flex-direction:column;gap:4px;position:relative;overflow:hidden;box-shadow:0 2px 8px rgba(99,102,241,.06);}
+.cv-stat::before{content:'';position:absolute;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,#6366f1,#8b5cf6);}
+.cv-stat .sv{font-size:24px;font-weight:900;color:#1e1b4b;line-height:1.1;letter-spacing:-.4px;}
+.cv-stat .sk{font-size:11px;text-transform:uppercase;letter-spacing:.07em;color:#9ca3af;font-weight:700;margin-top:3px;}
+.cv-card{background:#fff;border:1px solid #e8eaf0;border-radius:18px;box-shadow:0 2px 12px rgba(0,0,0,.05);margin-bottom:20px;overflow:hidden;}
+.cv-card-head{padding:16px 20px;border-bottom:1px solid #f0f0f6;display:flex;justify-content:space-between;align-items:center;gap:12px;background:linear-gradient(135deg,#fafbff,#fff);flex-wrap:wrap;}
+.cv-card-head h3{margin:0;font-size:15px;font-weight:800;color:#1e1b4b;letter-spacing:-.2px;}
+.cv-card-head .hint{font-size:12px;color:#9ca3af;font-weight:500;}
+.cv-card-body{padding:20px;}
+.cv-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:38px;font-weight:900;letter-spacing:.08em;color:#1e1b4b;text-align:center;background:linear-gradient(135deg,#f5f3ff,#eef2ff);border:1px dashed #c7d2fe;border-radius:14px;padding:22px;}
+.cv-exp{text-align:center;font-size:13px;color:#6b7280;margin-top:10px;}
+.cv-row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;}
+.cv-btn{font-weight:700;font-size:13px;cursor:pointer;border:0;border-radius:10px;padding:9px 15px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;box-shadow:0 2px 8px rgba(99,102,241,.25);}
+.cv-btn.ghost{background:#eef1f8;color:#3b4a6b;box-shadow:none;}
+.cv-btn.sm{padding:6px 11px;font-size:12px;}
+.cv-btn.safe{background:#ecfdf5;color:#059669;box-shadow:none;border:1px solid #a7f3d0;}
+.cv-btn.danger{background:#fef2f2;color:#dc2626;box-shadow:none;border:1px solid #fecaca;}
+.cv-btn:disabled{opacity:.5;cursor:default;}
+.cv-inp{font-size:14px;padding:10px 12px;border:1px solid #e3e7f0;border-radius:10px;background:#fff;color:#1e1b4b;width:100%;}
+.cv-inp:focus{outline:none;border-color:#8b5cf6;box-shadow:0 0 0 3px rgba(139,92,246,.12);}
+textarea.cv-inp{min-height:150px;resize:vertical;font-size:13px;line-height:1.55;}
+.cv-field{display:grid;grid-template-columns:1fr auto;gap:10px;}
+.cv-note{font-size:12px;color:#9ca3af;margin-top:8px;}
+table.cv-tbl{width:100%;border-collapse:collapse;font-size:13.5px;}
+table.cv-tbl th{text-align:left;padding:9px 8px;border-bottom:1px solid #eef0f5;color:#9ca3af;font-size:11px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;}
+table.cv-tbl td{padding:10px 8px;border-bottom:1px solid #f4f5f9;vertical-align:middle;color:#374151;}
+.cv-pill{font-size:10.5px;padding:2px 8px;border-radius:20px;background:#f3f4f6;color:#6b7280;font-weight:700;}
+.cv-pill.order{background:#ecfdf5;color:#059669;}
+.cv-empty{color:#9ca3af;font-size:13px;padding:16px 4px;text-align:center;}
+.cv-pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin-top:12px;font-size:12px;color:#6b7280;}
+.cv-tabs{display:flex;gap:6px;}
+.cv-tab{font-size:12px;font-weight:700;padding:6px 13px;border-radius:20px;cursor:pointer;border:1px solid #e3e7f0;background:#fff;color:#6b7280;}
+.cv-tab.active{background:#1e1b4b;color:#fff;border-color:#1e1b4b;}
+.cv-badge{font-size:11px;font-weight:700;padding:3px 9px;border-radius:20px;}
+.cv-badge.ok{background:#ecfdf5;color:#059669;border:1px solid #a7f3d0;}
+.cv-badge.warn{background:#fff7ed;color:#c2410c;border:1px solid #fed7aa;}
+.cv-search{max-width:240px;}
+.cv-toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%);background:#1e1b4b;color:#fff;padding:11px 18px;border-radius:11px;font-size:13px;font-weight:600;opacity:0;transition:.2s;pointer-events:none;z-index:9999;box-shadow:0 8px 24px rgba(30,27,75,.3);}
+.cv-toast.show{opacity:1;}
+@media(max-width:560px){.cv-code{font-size:28px;}.cv-field{grid-template-columns:1fr;}}
+</style>
+
+<div class="cv-summary">
+  <div class="cv-stat"><div class="sv" id="cv-s-state">…</div><div class="sk">Account</div></div>
+  <div class="cv-stat"><div class="sv" id="cv-s-code" style="font-family:ui-monospace,monospace;font-size:19px;">…</div><div class="sk">Live join code</div></div>
+  <div class="cv-stat"><div class="sv" id="cv-s-members">—</div><div class="sk">In the team</div></div>
+  <div class="cv-stat"><div class="sv" id="cv-s-unknown">—</div><div class="sk">Not on your list</div></div>
+</div>
+
+<div class="cv-card">
+  <div class="cv-card-head"><h3>🎟️ Join code</h3><span class="hint" id="cv-acct-line"></span></div>
+  <div class="cv-card-body">
+    <div class="cv-code" id="cv-code">…</div>
+    <div class="cv-exp" id="cv-exp"></div>
+    <div class="cv-row" style="margin-top:14px;justify-content:center;">
+      <button class="cv-btn ghost sm" onclick="cvCopy(CV.code)">Copy code</button>
+      <button class="cv-btn ghost sm" onclick="cvCopy(CV.link)">Copy join link</button>
+      <button class="cv-btn sm" onclick="cvLoadCode(true)">Refresh code now</button>
+    </div>
+  </div>
+</div>
+
+<div class="cv-card">
+  <div class="cv-card-head"><h3>✉️ Give the code to a customer</h3><span class="hint">adds them to your list + builds the message</span></div>
+  <div class="cv-card-body">
+    <div class="cv-field">
+      <input class="cv-inp" id="cv-cust" placeholder="customer email — they must join with this exact email">
+      <button class="cv-btn" onclick="cvBuildMsg()">Add + build message</button>
+    </div>
+    <textarea class="cv-inp" id="cv-msg" style="margin-top:12px;" placeholder="The ready-to-send message appears here…"></textarea>
+    <div class="cv-row" style="margin-top:8px;"><button class="cv-btn ghost sm" onclick="cvCopy(document.getElementById('cv-msg').value)">Copy message</button></div>
+  </div>
+</div>
+
+<div class="cv-card">
+  <div class="cv-card-head">
+    <h3>✅ Authorised emails <span class="cv-badge ok" id="cv-allow-count">0</span></h3>
+    <input class="cv-inp cv-search" id="cv-allow-search" placeholder="Search…" oninput="cvRenderAllow()">
+  </div>
+  <div class="cv-card-body">
+    <div class="cv-field">
+      <input class="cv-inp" id="cv-add-email" placeholder="email to authorise (never auto-removed)">
+      <button class="cv-btn ghost" onclick="cvAddAllow()">Add</button>
+    </div>
+    <div class="cv-note">Paid orders are added here automatically by the bot. Anyone on this list is never removed from the team.</div>
+    <table class="cv-tbl" style="margin-top:14px;"><thead><tr><th>Email</th><th>From</th><th>Added</th><th></th></tr></thead><tbody id="cv-allow-body"><tr><td class="cv-empty" colspan="4">Loading…</td></tr></tbody></table>
+    <div class="cv-pager" id="cv-allow-pager"></div>
+  </div>
+</div>
+
+<div class="cv-card">
+  <div class="cv-card-head">
+    <h3>👥 Team members</h3>
+    <div class="cv-tabs"><span class="cv-tab active" id="cv-tab-unknown" onclick="cvTab('unknown')">Not on list</span><span class="cv-tab" id="cv-tab-all" onclick="cvTab('all')">All members</span></div>
+  </div>
+  <div class="cv-card-body">
+    <div class="cv-row" style="justify-content:space-between;">
+      <button class="cv-btn" id="cv-scan-btn" onclick="cvScan()">Scan team now</button>
+      <input class="cv-inp cv-search" id="cv-scan-search" placeholder="Search…" oninput="cvRenderScan()">
+    </div>
+    <div class="cv-note" id="cv-scan-meta">Press “Scan team now” to read the team live from Canva.</div>
+    <div class="cv-note"><b>Not on list</b> = in the team but not a paid/authorised email. <b>Mark safe</b> keeps them (adds to your list); <b>Remove</b> takes them out of the team.</div>
+    <table class="cv-tbl" style="margin-top:12px;"><thead><tr><th>Email</th><th>Name</th><th>Role</th><th></th></tr></thead><tbody id="cv-scan-body"><tr><td class="cv-empty" colspan="4">—</td></tr></tbody></table>
+    <div class="cv-pager" id="cv-scan-pager"></div>
+  </div>
+</div>
+
+<div class="cv-toast" id="cv-toast"></div>
+
+<%- include('partials/footer') %>
+<script src="/js/canva.js"></script>
