@@ -163,10 +163,13 @@ function cvLoadProxy(){ cvGet('/proxy/monitor').then(function(m){ if(!m.ok)retur
   var bar=document.getElementById('cv-px-bar'); bar.style.width=Math.min(100,m.pct)+'%'; bar.className='cv-prox-bar'+(m.pct>=80?' warn':'');
   document.getElementById('cv-px-meta').innerHTML='Used <b>'+m.usedMb.toFixed(1)+' MB</b> of '+m.quotaMb+' MB ('+m.pct+'%) · rate '+(m.perDayMb==null?'—':m.perDayMb+' MB/day')+' · egress <b>'+cvEsc(m.egress||'unknown')+'</b> · sticky session '+m.sessionLifetimeMin+'m';
   var qi=document.getElementById('cv-px-quota'); if(qi && !qi.value) qi.value=m.quotaMb;
-  var b=document.getElementById('cv-px-log'), rows=m.log||[];
-  if(!rows.length){ b.innerHTML='<tr><td class="cv-empty" colspan="4">No activity yet.</td></tr>'; return; }
-  b.innerHTML=rows.map(function(r){ return '<tr><td>'+cvEsc(r.op||'')+'</td><td style="color:#9ca3af;">'+cvWhen(r.at)+'</td><td style="color:#9ca3af;">'+(r.ms!=null?(r.ms/1000).toFixed(1)+'s':'—')+'</td><td>'+cvFmtBytes(r.bytes)+'</td></tr>'; }).join('');
+  CV.pxlog = m.log || []; CV.pxPage = CV.pxPage || 1; cvRenderPx();
 }); }
+function cvRenderPx(){
+  cvPage(CV.pxlog||[], 'cv-px-log', 'cv-px-pager', CV.pxPage||1, 4, function(np){CV.pxPage=np;cvRenderPx();}, function(r){
+    return '<tr><td>'+cvEsc(r.op||'')+'</td><td style="color:#9ca3af;">'+cvWhen(r.at)+'</td><td style="color:#9ca3af;">'+(r.ms!=null?(r.ms/1000).toFixed(1)+'s':'—')+'</td><td>'+cvFmtBytes(r.bytes)+'</td></tr>';
+  });
+}
 function cvProxyTest(btn){ if(btn){btn.disabled=true;btn.textContent='Testing…';} cvToast('Testing proxy…'); cvPost('/proxytest',{}).then(function(r){ if(btn){btn.disabled=false;btn.textContent='Test connection';} cvToast(r.ok?('Egress IP: '+r.egressIp):(r.message||'Test failed')); cvLoadProxy(); }); }
 function cvSetQuota(){ var mb=parseInt((document.getElementById('cv-px-quota').value||'').trim(),10); if(!mb){cvToast('Enter quota in MB');return;} cvPost('/proxy/quota',{quotaMb:mb}).then(function(){cvToast('Quota saved');cvLoadProxy();}); }
 function cvResetUsage(){ if(!confirm('Reset the usage counter to zero?\nDo this right after you top up / buy new GB from IPRoyal.'))return; cvPost('/proxy/reset',{}).then(function(){cvToast('Usage reset');cvLoadProxy();}); }

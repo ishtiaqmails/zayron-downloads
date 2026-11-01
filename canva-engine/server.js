@@ -557,8 +557,10 @@ async function fetchCode(regen) {
     if (!toCode) toCode = await clickByText(page, ['via code']);
     log('code: clicked via-code=' + toCode);
     // on an explicit refresh, try Canva's "reset/generate new code" control so the code actually changes
-    let code = null;
+    let code = null, regenNet = [];
     if (regen) {
+      const onResp = r => { try { const m = r.request().method(); const u = r.url(); if (m !== 'GET' && /canva\.com/.test(u) && /_ajax|graphql|invit|code|class|join|token|member|reset|refresh/i.test(u)) regenNet.push(m + ' ' + r.status() + ' ' + u.replace('https://www.canva.com', '').split('?')[0].slice(0, 90)); } catch (e) {} };
+      page.on('response', onResp);
       try {
         const before = (await readCode(page, 8000).catch(() => null)) || ((await getAccount()).code || null);
         // 1) native click on the Refresh control (scrolls into view + real trusted click)
@@ -571,10 +573,12 @@ async function fetchCode(regen) {
         try { const confirmed = await page.evaluate(() => { const btns = [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button]')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }); for (const b of btns) { const t = (b.innerText || '').replace(/\s+/g, ' ').trim().toLowerCase(); if (/^(reset|generate|regenerate|new code|confirm|continue|got it|yes)\b/.test(t)) { (b.closest('button,[role=button]') || b).click(); return t.slice(0, 24); } } return ''; }); if (confirmed) log('regen: confirm "' + confirmed + '"'); } catch (e) {}
         // 3) wait until the code actually CHANGES from `before` (so we never read the stale one)
         for (let i = 0; i < 12 && !code; i++) { await sleep(1000); const cur = await readCode(page, 1500).catch(() => null); if (cur && cur !== before) code = cur; }
-        log('regen: before=' + before + ' after=' + (code || '(unchanged)'));
+        log('regen: before=' + before + ' after=' + (code || '(unchanged)') + ' net=' + JSON.stringify(regenNet.slice(-12)));
       } catch (e) { log('regen err ' + e.message); }
+      try { page.off('response', onResp); } catch (e) {}
     }
-    try { LAST_CONTROLS = await page.evaluate(() => { const dlg = document.querySelector('[role=dialog],[aria-modal=true]'); const dialogText = dlg ? (dlg.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 240) : ''; const ctrls = [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button],[role=dialog] a')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).map(e => ({ t: (e.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 24), a: (e.getAttribute('aria-label') || e.getAttribute('title') || '').slice(0, 24) })).filter(x => x.t || x.a).slice(0, 20); return { dialogText, ctrls }; }); } catch (e) { LAST_CONTROLS = []; }
+    try { LAST_CONTROLS = await page.evaluate(() => { const dlg = document.querySelector('[role=dialog],[aria-modal=true]'); const dialogText = dlg ? (dlg.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 240) : ''; const ctrls = [...document.querySelectorAll('[role=dialog] button,[aria-modal=true] button,[role=dialog] [role=button],[role=dialog] a')].filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; }).map(e => ({ t: (e.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 24), a: (e.getAttribute('aria-label') || e.getAttribute('title') || '').slice(0, 24) })).filter(x => x.t || x.a).slice(0, 20); return { dialogText, ctrls }; }); } catch (e) { LAST_CONTROLS = {}; }
+    if (regen) { try { LAST_CONTROLS.net = regenNet.slice(-14); } catch (e) {} }
     if (!code) code = await readCode(page, 15000);
     if (!code) { await shot(page, 'code-notfound'); return { ok: false, message: 'Code not found in dialog' }; }
     await setCode(code);
