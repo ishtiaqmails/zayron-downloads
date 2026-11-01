@@ -599,6 +599,21 @@ async function removeMember(email) {
   finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
 
+// ─── re-verify the stored session (recover from a transient needs_relogin without re-importing) ───
+async function reverify() {
+  const acct = await getAccount();
+  if (!acct.storage_state) return { ok: false, message: 'No stored session — import needed' };
+  await lock();
+  const browser = await launch();
+  try {
+    const page = await newPage(browser);
+    await restoreStorage(page, acct.storage_state);
+    if (await isLoggedIn(page)) { const storage = await saveStorage(page); await setState('active', { storage, heartbeat: true }); log('reverify: active'); return { ok: true, state: 'active' }; }
+    await setState('needs_relogin'); return { ok: false, state: 'needs_relogin', message: 'Stored session is not logged in — re-import needed' };
+  } catch (e) { return { ok: false, message: e.message }; }
+  finally { try { await browser.close(); } catch (e) {} unlock(); }
+}
+
 // ─── heartbeat (skips if a browser op is in progress) ───
 async function heartbeat() {
   const acct = await getAccount();
@@ -624,6 +639,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'GET' && req.url === '/status') { const a = await getAccount(); return send(res, 200, { email: a.email || null, state: a.state, brand: (a && a.brand) || DEFAULT_BRAND, proxy: (a && a.proxy) ? 'set' : (process.env.CANVA_PROXY ? 'env' : null), stealth: STEALTH, lastHeartbeat: a.last_heartbeat || null }); }
     if (req.method === 'POST' && req.url === '/config') { const b = await readBody(req); if (!('brand' in b) && !('proxy' in b)) return send(res, 400, { ok: false, message: 'brand and/or proxy required' }); const extra = {}; if ('brand' in b) extra.brand = String(b.brand).trim(); if ('proxy' in b) extra.proxy = String(b.proxy).trim(); await setState((await getAccount()).state || 'none', extra); const a = await getAccount(); return send(res, 200, { ok: true, brand: a.brand || DEFAULT_BRAND, proxy: a.proxy ? 'set' : null }); }
     if (req.method === 'POST' && req.url === '/proxytest') { try { return send(res, 200, await proxyTest()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
+    if (req.method === 'GET' && req.url === '/reverify') { try { return send(res, 200, await reverify()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && (req.url === '/code' || req.url === '/code/refresh')) { try { return send(res, 200, await getCode(req.url.endsWith('refresh'))); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && req.url === '/members') { try { return send(res, 200, await fetchMembers()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
     if (req.method === 'GET' && req.url === '/reconcile') { try { return send(res, 200, await reconcile()); } catch (e) { return send(res, 200, { ok: false, message: e.message }); } }
