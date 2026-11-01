@@ -30,17 +30,49 @@ function isCanvaProduct(product) { return !!(product && product.delivery_type ==
 async function isEngineOrder(product) { if (!(await isEnabled())) return false; return isCanvaProduct(product); }
 
 function joinMsg(email, c) {
-  const exp = c && c.expiresAt ? new Date(c.expiresAt).toLocaleString('en-GB', { timeZone: 'Asia/Karachi', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '(reply "canva" for a fresh code)';
+  let exp = '(reply "canva" for a fresh code)';
+  if (c && c.expiresAt) {
+    const d = new Date(c.expiresAt);
+    const time = d.toLocaleString('en-US', { timeZone: 'Asia/Karachi', hour: 'numeric', minute: '2-digit', hour12: true });
+    const date = d.toLocaleString('en-GB', { timeZone: 'Asia/Karachi', day: '2-digit', month: '2-digit', year: 'numeric' });
+    exp = time + ' · ' + date;
+  }
   return [
-    '🎨 *Canva Education — ready!*', '',
-    'Join with THIS email: *' + email + '*', '',
-    'How to join:',
-    '1) Open: ' + ((c && c.joinLink) || 'https://www.canva.com/class/join'),
-    '2) Enter code: *' + ((c && c.code) || '') + '*',
-    '3) Sign in or sign up with the email above — it must match, or you will be removed.', '',
-    '⏳ Code valid until: ' + exp,
-    '(If the code stops working, reply *canva* for a fresh one.)', '',
-    'You now have full Canva Pro features for 1 year. Enjoy!'
+    '🎨 *Canva Education — Activated*',
+    '───────────',
+    '',
+    '👤 *Your email*',
+    email,
+    '',
+    '🔑 *Join code*',
+    '*' + ((c && c.code) || '') + '*',
+    '',
+    '📋 *How to join*',
+    '1.  Open ' + ((c && c.joinLink) || 'https://www.canva.com/class/join'),
+    '2.  Enter the code above',
+    '3.  Sign in or sign up with your email above',
+    '',
+    '⚠️  Use that *exact* email — joining with any other email is removed automatically.',
+    '',
+    '⏳ *Code valid till:* ' + exp,
+    '🔄 Code stopped working? Reply *canva* for a new one.',
+    '',
+    '✅ Full *Canva Pro* access for 1 year. Enjoy!'
+  ].join('\n');
+}
+
+function joinedMsg(email, expiresAt) {
+  let till = '';
+  if (expiresAt) { const d = new Date(expiresAt); till = d.toLocaleString('en-GB', { timeZone: 'Asia/Karachi', day: '2-digit', month: '2-digit', year: 'numeric' }); }
+  return [
+    '✅ *Canva Education — You’re in!*',
+    '───────────',
+    '',
+    '🎉 ' + email + ' has joined successfully.',
+    '',
+    (till ? ('📅 *Active until:* ' + till + '  (1 year)') : '📅 *Active for 1 year*'),
+    '',
+    'You now have full *Canva Pro* features. Enjoy!'
   ].join('\n');
 }
 
@@ -67,7 +99,7 @@ async function deliver(sock, order, product) {
   try { await db.query('UPDATE orders SET notes=$1 WHERE id=$2', [JSON.stringify(newMeta), order.id]); } catch (e) {}
   try { await db.query('UPDATE canva_allowlist SET last_sent_at=NOW() WHERE email = ANY($1::text[])', [emails.map(x => String(x).trim().toLowerCase())]); } catch (e) {}
   logger.info('canva engine delivered', { order: order.order_no, emails: emails.length });
-  try { const config = require('../../config'); await sock.sendMessage(config.owner.phone + '@s.whatsapp.net', { text: '🎨 *Canva delivered (auto)*\n\nOrder: ' + order.order_no + '\nEmail: ' + emails.join(', ') + '\nCode sent to the customer.' }); } catch (e) {}
+  try { const notif = require('./notificationService'); await notif.notifyOwner('🎨 *Canva order delivered (auto)*\n\n📦 Order: ' + order.order_no + '\n📧 Email: ' + emails.join(', ') + '\n✅ Code + join link sent to the customer.'); } catch (e) {}
   return { ok: true, delivered: emails.length };
 }
 
@@ -86,10 +118,12 @@ async function maybeResendForText(sock, jid, phone, textLower) {
 async function tick(sock) {
   if (!(await isEnabled())) return;
   try {
-    const ob = (await db.query("SELECT id, email, phone FROM canva_outbox WHERE status='queued' ORDER BY id ASC LIMIT 20")).rows;
+    const ob = (await db.query("SELECT id, kind, email, phone FROM canva_outbox WHERE status='queued' ORDER BY id ASC LIMIT 20")).rows;
     for (const row of ob) {
       const jid = normPhone(row.phone) + '@s.whatsapp.net';
-      const r = await sendCodeTo(sock, jid, row.email, true);
+      let r;
+      if (row.kind === 'joined') { try { const er = (await db.query('SELECT expires_at FROM canva_allowlist WHERE email=$1', [row.email])).rows[0]; await sock.sendMessage(jid, { text: joinedMsg(row.email, er && er.expires_at) }); r = { ok: true }; } catch (e) { r = { ok: false }; } }
+      else { r = await sendCodeTo(sock, jid, row.email, true); }
       await db.query('UPDATE canva_outbox SET status=$2, done_at=NOW() WHERE id=$1', [row.id, r.ok ? 'done' : 'failed']);
     }
   } catch (e) { logger.error('canva outbox', { err: e.message }); }

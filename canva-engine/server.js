@@ -111,7 +111,7 @@ function normEmail(e) { return String(e || '').trim().toLowerCase(); }
 const TERM_DAYS = 365;  // paid Canva order = 1 year of access
 async function listAllow() { const r = await db.query('SELECT email, source, order_ref, note, added_at, expires_at, joined_at, customer_phone FROM canva_allowlist ORDER BY added_at DESC'); return r.rows; }
 // confirm joins: any allowlisted email that now appears in the team gets joined_at stamped (called on every members read — no extra bandwidth)
-async function markJoins(members) { try { const emails = (members || []).map(m => normEmail(m.email)).filter(Boolean); if (!emails.length) return; await db.query('UPDATE canva_allowlist SET joined_at = COALESCE(joined_at, NOW()) WHERE joined_at IS NULL AND email = ANY($1::text[])', [emails]); } catch (e) { log('markJoins', e.message); } }
+async function markJoins(members) { try { const emails = (members || []).map(m => normEmail(m.email)).filter(Boolean); if (!emails.length) return; const r = await db.query('UPDATE canva_allowlist SET joined_at=NOW() WHERE joined_at IS NULL AND email = ANY($1::text[]) RETURNING email, customer_phone, source', [emails]); for (const row of r.rows) { if (row.source === 'order' && row.customer_phone) { try { await db.query("INSERT INTO canva_outbox(kind,email,phone,status) VALUES('joined',$1,$2,'queued')", [row.email, row.customer_phone]); } catch (e) {} } } } catch (e) { log('markJoins', e.message); } }
 async function pendingJoinCount() { try { const r = await db.query("SELECT COUNT(*)::int n FROM canva_allowlist WHERE joined_at IS NULL AND (expires_at IS NULL OR expires_at > NOW())"); return r.rows[0].n; } catch (e) { return 0; } }
 // expiresAt: explicit ISO/Date, or undefined => auto (orders get now+TERM_DAYS, manual stays permanent/NULL)
 async function addAllow(email, source, orderRef, note, expiresAt, customerPhone) { email = normEmail(email); if (!email || !email.includes('@')) return false; source = source || 'manual'; let exp = (expiresAt === undefined) ? (source === 'order' ? new Date(Date.now() + TERM_DAYS * 86400000) : null) : (expiresAt ? new Date(expiresAt) : null); const ph = customerPhone ? String(customerPhone).replace(/[^0-9]/g, '') : null; await db.query('INSERT INTO canva_allowlist(email,source,order_ref,note,expires_at,customer_phone) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(email) DO UPDATE SET source=EXCLUDED.source, order_ref=COALESCE(EXCLUDED.order_ref,canva_allowlist.order_ref), note=COALESCE(EXCLUDED.note,canva_allowlist.note), expires_at=EXCLUDED.expires_at, customer_phone=COALESCE(EXCLUDED.customer_phone,canva_allowlist.customer_phone)', [email, source, orderRef || null, note || null, exp, ph]); return true; }
@@ -538,7 +538,7 @@ async function readCode(page, ms) {
   }
   return null;
 }
-async function fetchCode() {
+async function fetchCode(regen) {
   const acct = await getAccount();
   if (acct.state !== 'active' || !acct.storage_state) return { ok: false, message: 'No active Canva session' };
   await lock();
@@ -552,6 +552,8 @@ async function fetchCode() {
     let toCode = await clickDirect(page, 'via code', 20);
     if (!toCode) toCode = await clickByText(page, ['via code']);
     log('code: clicked via-code=' + toCode);
+    // on an explicit refresh, try Canva's "reset/generate new code" control so the code actually changes
+    if (regen) { try { const did = await clickByText(page, ['reset code', 'refresh code', 'generate new code', 'regenerate code', 'new code', 'regenerate']); if (did) { log('code: regenerate clicked'); await sleep(2500); } } catch (e) {} }
     const code = await readCode(page, 15000);
     if (!code) { await shot(page, 'code-notfound'); return { ok: false, message: 'Code not found in dialog' }; }
     await setCode(code);
@@ -565,7 +567,7 @@ const CODE_TTL_MS = 4 * 3600 * 1000;
 async function getCode(forceFresh) {
   const a = await getAccount();
   const ageMs = a.code_at ? (Date.now() - new Date(a.code_at).getTime()) : Infinity;
-  if (forceFresh || !a.code || ageMs >= 3.5 * 3600 * 1000) { const f = await fetchCode(); if (!f.ok) return f; }
+  if (forceFresh || !a.code || ageMs >= 3.5 * 3600 * 1000) { const f = await fetchCode(forceFresh); if (!f.ok) return f; }
   const a2 = await getAccount();
   const codeAt = a2.code_at ? new Date(a2.code_at).getTime() : Date.now();
   const expiresAt = codeAt + CODE_TTL_MS;

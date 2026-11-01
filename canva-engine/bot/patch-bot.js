@@ -33,20 +33,32 @@ if(sc.indexOf('canva tick registered')<0){
   sc = sc.replace(anchor, add); fs.writeFileSync(sch,sc); console.log('scheduler: canva tick inserted');
 } else console.log('scheduler: already has canva tick — skipped');
 
-// 3) handler — customer keyword resend hook (before first global 'back')
+// 3) handler — keyword resend hook + engine-mode owner-alert guards
 const hnd = path.join(BOT,'src/bot/handler.js');
 let hd = fs.readFileSync(hnd,'utf8');
+let hchanged = false;
+backup(hnd); touched.push(hnd);
+// 3a) keyword hook before first global 'back'
 if(hd.indexOf('CANVA_KEYWORD_v1')<0){
-  backup(hnd); touched.push(hnd);
   const lines = hd.split('\n');
-  let idx = lines.findIndex(l => l.trim() === "if (textLower === 'back') {");
+  const idx = lines.findIndex(l => l.trim() === "if (textLower === 'back') {");
   if(idx < 0){ console.log('ABORT: handler back-anchor not found'); restoreAll(); process.exit(1); }
   const indent = (lines[idx].match(/^\s*/)||[''])[0];
-  const hook = indent + "// CANVA_KEYWORD_v1 — paid Canva customer can reply for a fresh join code\n" +
-               indent + "try { const _cd = require('../services/canvaDelivery'); if (await _cd.maybeResendForText(sock, jid, phone, textLower)) return; } catch (e) {}";
-  lines.splice(idx, 0, hook);
-  fs.writeFileSync(hnd, lines.join('\n')); console.log('handler: keyword hook inserted before line '+(idx+1));
-} else console.log('handler: already has keyword hook — skipped');
+  lines.splice(idx, 0, indent + "// CANVA_KEYWORD_v1 — paid Canva customer can reply for a fresh join code\n" + indent + "try { const _cd = require('../services/canvaDelivery'); if (await _cd.maybeResendForText(sock, jid, phone, textLower)) return; } catch (e) {}");
+  hd = lines.join('\n'); hchanged = true; console.log('handler: keyword hook inserted');
+} else console.log('handler: keyword hook present');
+// 3b) suppress the old invite owner-alerts for Canva engine orders
+if(hd.indexOf('CANVA_ENGINE_FLAG_v1')<0){
+  const a1 = "  // INVITE_CONFIRM_BRANCH_v1 — vendor_invite products have a custom delivery flow (no stock)\n  if (data.deliveryType === 'vendor_invite') {";
+  if(hd.indexOf(a1)<0){ console.log('ABORT: confirm-branch anchor not found'); restoreAll(); process.exit(1); }
+  hd = hd.replace(a1, a1 + "\n    const _canvaEngine = await (async () => { try { return await require('../services/canvaDelivery').isEngineOrder({ id: data.productId, delivery_type: data.deliveryType, name: data.productName }); } catch (e) { return false; } })(); /*CANVA_ENGINE_FLAG_v1*/");
+  const a2 = "      await notificationService.notifyOwner(_im);";
+  if(hd.indexOf(a2)>=0) hd = hd.replace(a2, "      if (!_canvaEngine) await notificationService.notifyOwner(_im);");
+  const a3 = "    // Owner alert: order placed\n    try {";
+  if(hd.indexOf(a3)>=0) hd = hd.replace(a3, "    // Owner alert: order placed\n    if (!_canvaEngine) try {");
+  hchanged = true; console.log('handler: engine-mode owner guards applied');
+} else console.log('handler: owner guards present');
+if(hchanged) fs.writeFileSync(hnd, hd);
 
 // 4) syntax-check everything; restore on any failure
 const checks = [svc, inv, sch, hnd];
