@@ -74,6 +74,7 @@ async function setState(state, extra) {
   if ('storage' in extra) { sets.push('storage_state=$' + i); vals.push(extra.storage ? JSON.stringify(extra.storage) : null); i++; }
   if ('brand' in extra) { sets.push('brand=$' + i); vals.push(extra.brand); i++; }
   if ('proxy' in extra) { sets.push('proxy=$' + i); vals.push(extra.proxy); i++; }
+  if ('code' in extra) { sets.push('code=$' + i); vals.push(extra.code); i++; }
   if ('heartbeat' in extra) { sets.push('last_heartbeat=NOW()'); }
   await db.query('UPDATE canva_account SET ' + sets.join(', ') + ' WHERE id=1', vals);
 }
@@ -184,6 +185,16 @@ async function saveStorage(page) {
   const ss = await page.evaluate(() => { const o = {}; try { for (let i = 0; i < sessionStorage.length; i++) { const k = sessionStorage.key(i); o[k] = sessionStorage.getItem(k); } } catch (e) {} return o; });
   return { cookies, localStorage: ls, sessionStorage: ss, savedAt: Date.now() };
 }
+// Detect the account's brand id from an /brands/<id>/ request fired on the People page (for account switching).
+async function detectBrand(page) {
+  let b = null;
+  const h = (res) => { try { const m = res.url().match(/\/brands\/([A-Za-z0-9_-]{6,})\//); if (m) b = m[1]; } catch (e) {} };
+  page.on('response', h);
+  await page.goto('https://www.canva.com/settings/people', { waitUntil: 'domcontentloaded', timeout: 60000 }).catch(() => {});
+  await sleep(6000);
+  try { if (page.off) page.off('response', h); } catch (e) {}
+  return b;
+}
 async function restoreStorage(page, storage) {
   if (!storage) return;
   if (Array.isArray(storage.cookies) && storage.cookies.length) { try { await page.setCookie(...storage.cookies); } catch (e) { log('setCookie warn', e.message); } }
@@ -212,9 +223,13 @@ async function sessionImport(body) {
     if (!await isLoggedIn(page)) { await shot(page, 'import-notloggedin'); return { ok: false, state: 'error', message: 'Imported session is NOT logged in. Re-export canva.com cookies while logged in.' }; }
     let merged = storage;
     try { const fresh = await saveStorage(page); if (fresh.cookies && fresh.cookies.length) merged = { cookies: fresh.cookies, localStorage: Object.keys(fresh.localStorage || {}).length ? fresh.localStorage : storage.localStorage, sessionStorage: fresh.sessionStorage || storage.sessionStorage, savedAt: Date.now() }; } catch (e) {}
-    await setState('active', { email: body.email || null, storage: merged });
-    log('session imported + verified + profile warmed (cookies:' + norm.length + ')');
-    return { ok: true, state: 'active', message: 'Session imported and verified — Canva is logged in.' };
+    let detectedBrand = null; try { detectedBrand = await detectBrand(page); } catch (e) {}
+    const extra = { email: body.email || null, storage: merged };
+    if (detectedBrand) extra.brand = detectedBrand;
+    extra.code = null; // new account => clear cached code so it refetches
+    await setState('active', extra);
+    log('session imported + verified + profile warmed (cookies:' + norm.length + ', brand=' + (detectedBrand || '(kept)') + ')');
+    return { ok: true, state: 'active', message: 'Session imported and verified — Canva is logged in.', brand: detectedBrand || null };
   } catch (e) { return { ok: false, state: 'error', message: e.message }; }
   finally { try { await browser.close(); } catch (e) {} unlock(); }
 }
@@ -480,9 +495,11 @@ async function fetchMembersRaw() {
       try {
         const u = '/_ajax/profile/v2/brands/' + encodeURIComponent(brand) + '/members?limit=100';
         const r = await fetch(u, { headers: { accept: 'application/json' }, credentials: 'include' });
-        const j = await r.json();
+        let text = await r.text();
+        const i = text.search(/[\[{]/); if (i > 0) text = text.slice(i);   // strip anti-hijack prefix like )]}' or '])}while(1);
+        const j = JSON.parse(text);
         const arr = Array.isArray(j.A) ? j.A : (Array.isArray(j) ? j : (Object.values(j).find(v => Array.isArray(v)) || []));
-        return { status: r.status, topKeys: Object.keys(j), count: arr.length, sample: JSON.stringify(arr.slice(0, 2)).slice(0, 1200) };
+        return { status: r.status, topKeys: Object.keys(j), count: arr.length, sample: JSON.stringify(arr.slice(0, 2)).slice(0, 1400), tail: JSON.stringify(j).slice(-180) };
       } catch (e) { return { error: String(e) }; }
     }, brand);
     return { ok: true, data };
